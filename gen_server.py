@@ -1,6 +1,8 @@
-#!/usr/bin/python2
+#!/usr/bin/env python
 """
 Generator Control TCP Server for Olimex MOD-IO
+
+Compatible with Python 2.7 and Python 3.x
 
 Listens for commands from the Pi and controls the generator via I2C relays.
 
@@ -15,10 +17,12 @@ Commands (newline-terminated):
 Responses are newline-terminated. Multi-line responses end with "END".
 
 Usage:
-  python2 gen_server.py [--port PORT] [--host HOST]
+  python gen_server.py [--port PORT] [--host HOST]
 
 Default: listens on 0.0.0.0:9999
 """
+
+from __future__ import print_function
 
 import socket
 import sys
@@ -55,7 +59,7 @@ start_in_progress = False
 def log(message):
     """Log with timestamp"""
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print "%s | %s" % (ts, message)
+    print("%s | %s" % (ts, message))
     sys.stdout.flush()
 
 
