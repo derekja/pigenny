@@ -5,8 +5,12 @@ Wants=multi-user.target
 
 [Service]
 Type=oneshot
+# Create marker file to prove service started (before Python runs)
+ExecStartPre=/bin/sh -c 'echo "Service started at $(date)" > /var/log/gen_service_started.txt'
 ExecStartPre=/bin/sleep 30
-ExecStart=/usr/bin/python2 /usr/local/bin/diagnose_inputs.py --log-file /var/log/gen_diagnostic.log
+ExecStart=/usr/bin/python2 /usr/local/bin/diagnose_inputs.py
+# Create marker file when service completes
+ExecStartPost=/bin/sh -c 'echo "Service completed at $(date)" >> /var/log/gen_service_started.txt'
 RemainAfterExit=yes
 StandardOutput=journal
 StandardError=journal

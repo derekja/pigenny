@@ -1,271 +1,330 @@
 #!/usr/bin/python2
 """
-Generator Input Diagnostic Script
+Generator Input Diagnostic Script v2
 
-This script runs a timer-driven generator start sequence while continuously
-logging the state of all 4 optoisolated inputs on the MOD-IO board.
-
-Purpose: Identify what generator signals are connected to IN1-IN4 before
-migrating to Raspberry Pi.
-
-Usage: python2 diagnose_inputs.py [--no-start] [--duration SECONDS]
-
-Output: /tmp/gen_diagnostic.log (timestamped input states and relay commands)
-
-WARNING: This script WILL attempt to start the generator unless --no-start is used.
+Changes from v1:
+- Writes heartbeat file immediately to prove script ran
+- Better error handling and logging
+- Writes to multiple log locations
+- Delays I2C init to capture early errors
 """
 
-import smbus
 import time
 import sys
-import threading
-import argparse
+import os
+import traceback
 from datetime import datetime
 
-# I2C Configuration
-BUS = smbus.SMBus(0)
-MODIO_ADDR = 0x58
-REG_RELAY = 0x10    # Relay control register (write)
-REG_INPUT = 0x20    # Digital input register (read)
+# Log file locations - try multiple places
+LOG_LOCATIONS = [
+    "/var/log/gen_diagnostic.log",
+    "/tmp/gen_diagnostic.log",
+    "/home/alarm/gen_diagnostic.log",
+    "/root/gen_diagnostic.log",
+]
 
-# Log file location (easy to find on SD card)
-LOG_FILE = "/tmp/gen_diagnostic.log"
+# Heartbeat file - proves script started
+HEARTBEAT_FILE = "/var/log/gen_diag_started.txt"
+HEARTBEAT_BACKUP = "/tmp/gen_diag_started.txt"
 
-# Global flag to control logging thread
-logging_active = True
+# Global log file handle
+logfile = None
 
 
 def get_timestamp():
-    """Returns current timestamp as string"""
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
 
-def decode_inputs(status_byte):
-    """Decode input status byte into individual input states"""
-    in1 = (status_byte & 0b0001) != 0
-    in2 = (status_byte & 0b0010) != 0
-    in3 = (status_byte & 0b0100) != 0
-    in4 = (status_byte & 0b1000) != 0
-    return in1, in2, in3, in4
+def write_heartbeat(message):
+    """Write heartbeat to prove script is running"""
+    ts = get_timestamp()
+    content = "%s | %s\n" % (ts, message)
+
+    for path in [HEARTBEAT_FILE, HEARTBEAT_BACKUP]:
+        try:
+            with open(path, 'a') as f:
+                f.write(content)
+        except:
+            pass
 
 
-def decode_relays(relay_byte):
-    """Decode relay command byte into individual relay states"""
-    starter = (relay_byte & 0b0001) != 0
-    charger = (relay_byte & 0b0010) != 0
-    glow = (relay_byte & 0b0100) != 0
-    ignition = (relay_byte & 0b1000) != 0
-    return starter, charger, glow, ignition
+def open_log():
+    """Try to open log file in multiple locations"""
+    global logfile
+
+    for path in LOG_LOCATIONS:
+        try:
+            logfile = open(path, 'w')
+            write_heartbeat("Log opened: %s" % path)
+            return path
+        except Exception as e:
+            write_heartbeat("Failed to open %s: %s" % (path, str(e)))
+
+    return None
 
 
-def format_inputs(status_byte):
+def log(message, also_print=True):
+    """Write to log file"""
+    global logfile
+    ts = get_timestamp()
+    line = "%s | %s" % (ts, message)
+
+    if also_print:
+        print line
+
+    if logfile:
+        try:
+            logfile.write(line + "\n")
+            logfile.flush()
+        except:
+            pass
+
+    # Also write important messages to heartbeat
+    if "ERROR" in message or "PHASE" in message or "CHANGE" in message:
+        write_heartbeat(message)
+
+
+def init_i2c():
+    """Initialize I2C bus with error handling"""
+    log("Attempting to import smbus...")
+    try:
+        import smbus
+        log("smbus imported successfully")
+    except ImportError as e:
+        log("ERROR: Failed to import smbus: %s" % str(e))
+        return None, None
+
+    log("Attempting to open I2C bus 0...")
+    try:
+        bus = smbus.SMBus(0)
+        log("I2C bus 0 opened successfully")
+    except Exception as e:
+        log("ERROR: Failed to open I2C bus 0: %s" % str(e))
+        return None, None
+
+    # Test communication with MOD-IO
+    log("Testing communication with MOD-IO at 0x58...")
+    try:
+        status = bus.read_byte_data(0x58, 0x20)
+        log("MOD-IO responded! Initial input status: %d (bin: %s)" % (status, bin(status)))
+        return bus, smbus
+    except Exception as e:
+        log("ERROR: MOD-IO communication failed: %s" % str(e))
+        return None, None
+
+
+def format_inputs(status):
     """Format input status for logging"""
-    in1, in2, in3, in4 = decode_inputs(status_byte)
-    return "IN1=%d IN2=%d IN3=%d IN4=%d (raw=%d, bin=%s)" % (
-        in1, in2, in3, in4, status_byte, bin(status_byte)
+    if status is None:
+        return "READ_ERROR"
+    in1 = (status & 0b0001) != 0
+    in2 = (status & 0b0010) != 0
+    in3 = (status & 0b0100) != 0
+    in4 = (status & 0b1000) != 0
+    return "IN1=%d IN2=%d IN3=%d IN4=%d (raw=%d bin=%s)" % (
+        in1, in2, in3, in4, status, bin(status)
     )
 
 
 def format_relays(relay_byte):
     """Format relay state for logging"""
-    starter, charger, glow, ignition = decode_relays(relay_byte)
     names = []
-    if ignition: names.append("IGN")
-    if glow: names.append("GLOW")
-    if charger: names.append("CHARGER")
-    if starter: names.append("START")
+    if relay_byte & 0b1000: names.append("IGN")
+    if relay_byte & 0b0100: names.append("GLOW")
+    if relay_byte & 0b0010: names.append("CHARGER")
+    if relay_byte & 0b0001: names.append("START")
     if not names: names.append("OFF")
     return "%s (bin=%s)" % ("+".join(names), bin(relay_byte))
 
 
-def log_message(logfile, message, also_print=True):
-    """Write timestamped message to log file and optionally print"""
-    line = "%s | %s\n" % (get_timestamp(), message)
-    logfile.write(line)
-    logfile.flush()
-    if also_print:
-        print line.strip()
+def read_inputs(bus):
+    """Read input status with error handling"""
+    try:
+        return bus.read_byte_data(0x58, 0x20)
+    except Exception as e:
+        log("ERROR reading inputs: %s" % str(e))
+        return None
 
 
-def input_logger(logfile, interval=0.1):
-    """Background thread that logs input states at regular intervals"""
-    global logging_active
+def set_relays(bus, relay_byte):
+    """Set relay state with error handling"""
+    log("RELAY SET: %s" % format_relays(relay_byte))
+    try:
+        bus.write_byte_data(0x58, 0x10, relay_byte)
+        return True
+    except Exception as e:
+        log("ERROR setting relays: %s" % str(e))
+        return False
+
+
+def monitor_inputs(bus, duration, interval=0.1):
+    """Monitor inputs for a duration, logging changes"""
+    log("Monitoring inputs for %d seconds..." % duration)
     last_status = -1
+    end_time = time.time() + duration
 
-    while logging_active:
-        try:
-            status = BUS.read_byte_data(MODIO_ADDR, REG_INPUT)
-            # Always log, but mark changes prominently
-            if status != last_status:
-                log_message(logfile, "INPUT CHANGE: %s" % format_inputs(status))
-                last_status = status
-            else:
-                log_message(logfile, "INPUT: %s" % format_inputs(status), also_print=False)
-        except Exception as e:
-            log_message(logfile, "INPUT READ ERROR: %s" % str(e))
-
+    while time.time() < end_time:
+        status = read_inputs(bus)
+        if status != last_status:
+            log("INPUT CHANGE: %s" % format_inputs(status))
+            last_status = status
         time.sleep(interval)
 
-
-def set_relays(logfile, relay_byte):
-    """Set relay state and log the command"""
-    log_message(logfile, "RELAY SET: %s" % format_relays(relay_byte))
-    BUS.write_byte_data(MODIO_ADDR, REG_RELAY, relay_byte)
+    return last_status
 
 
-def run_diagnostic_sequence(logfile, run_generator=True):
-    """
-    Run timer-driven diagnostic sequence.
+def run_diagnostic(bus):
+    """Run the diagnostic sequence"""
 
-    If run_generator=False, just monitors inputs without controlling relays.
-    """
-    global logging_active
+    log("")
+    log("=" * 60)
+    log("GENERATOR INPUT DIAGNOSTIC STARTING")
+    log("=" * 60)
+    log("")
 
-    log_message(logfile, "=" * 60)
-    log_message(logfile, "DIAGNOSTIC SEQUENCE STARTING")
-    log_message(logfile, "Generator control: %s" % ("ENABLED" if run_generator else "DISABLED (monitor only)"))
-    log_message(logfile, "=" * 60)
+    # Check initial state
+    initial = read_inputs(bus)
+    log("Initial input state: %s" % format_inputs(initial))
+    log("")
 
-    # Start background input logging thread
-    logger_thread = threading.Thread(target=input_logger, args=(logfile, 0.1))
-    logger_thread.daemon = True
-    logger_thread.start()
+    # === PHASE 1: BASELINE (10 seconds) ===
+    log("=== PHASE 1: BASELINE - All relays OFF (10s) ===")
+    set_relays(bus, 0b0000)
+    last = monitor_inputs(bus, 10)
+    log("End of baseline. Status: %s" % format_inputs(last))
+    log("")
 
-    try:
-        if not run_generator:
-            # Monitor-only mode - just log inputs for 60 seconds
-            log_message(logfile, "MONITOR MODE: Logging inputs for 60 seconds")
-            log_message(logfile, "Manually start/stop generator to observe input changes")
-            time.sleep(60)
-            return
+    # === PHASE 2: IGNITION ONLY (5 seconds) ===
+    log("=== PHASE 2: IGNITION ON (5s) ===")
+    log("This energizes the fuel solenoid")
+    set_relays(bus, 0b1000)
+    last = monitor_inputs(bus, 5)
+    log("End of ignition-only. Status: %s" % format_inputs(last))
+    log("")
 
-        # === PHASE 1: RESET (5 seconds baseline) ===
-        log_message(logfile, "")
-        log_message(logfile, "=== PHASE 1: RESET - All relays OFF (5s baseline) ===")
-        set_relays(logfile, 0b0000)
-        time.sleep(5)
+    # === PHASE 3: CRANK (10 seconds) ===
+    log("=== PHASE 3: IGNITION + STARTER (10s crank) ===")
+    set_relays(bus, 0b1001)
+    last = monitor_inputs(bus, 10)
+    log("End of crank. Status: %s" % format_inputs(last))
+    log("")
 
-        # === PHASE 2: IGNITION ON ===
-        log_message(logfile, "")
-        log_message(logfile, "=== PHASE 2: IGNITION ON (1s fuel solenoid) ===")
-        set_relays(logfile, 0b1000)
-        time.sleep(1)
+    # === PHASE 4: GLOW + CRANK (2 seconds) ===
+    log("=== PHASE 4: IGNITION + GLOW + STARTER (2s) ===")
+    set_relays(bus, 0b1101)
+    last = monitor_inputs(bus, 2)
+    log("End of glow-crank. Status: %s" % format_inputs(last))
+    log("")
 
-        # === PHASE 3: INITIAL CRANK (10 seconds) ===
-        log_message(logfile, "")
-        log_message(logfile, "=== PHASE 3: IGNITION + STARTER (10s crank) ===")
-        set_relays(logfile, 0b1001)
-        time.sleep(10)
+    # === PHASE 5: COAST (5 seconds) ===
+    log("=== PHASE 5: IGNITION ONLY - Coast (5s) ===")
+    set_relays(bus, 0b1000)
+    last = monitor_inputs(bus, 5)
+    log("End of coast. Status: %s" % format_inputs(last))
+    log("")
 
-        # === PHASE 4: GLOW-ASSISTED CRANK (2 seconds) ===
-        log_message(logfile, "")
-        log_message(logfile, "=== PHASE 4: IGNITION + GLOW + STARTER (2s) ===")
-        set_relays(logfile, 0b1101)
-        time.sleep(2)
+    # === PHASE 6: CHECK STATUS ===
+    log("=== PHASE 6: STATUS CHECK ===")
+    status = read_inputs(bus)
+    log("Current status: %s" % format_inputs(status))
 
-        # === PHASE 5: COAST/CHECK (4 seconds) ===
-        log_message(logfile, "")
-        log_message(logfile, "=== PHASE 5: IGNITION ONLY - Coast/Check (4s) ===")
-        set_relays(logfile, 0b1000)
-        time.sleep(4)
+    if status == 3:
+        log("Generator appears RUNNING (status=3)")
+        log("")
 
-        # === PHASE 6: CHECK STATUS AND DECIDE ===
-        log_message(logfile, "")
-        status = BUS.read_byte_data(MODIO_ADDR, REG_INPUT)
-        log_message(logfile, "=== STATUS CHECK: %s ===" % format_inputs(status))
+        # === PHASE 7: WARMUP (30 seconds) ===
+        log("=== PHASE 7: WARMUP (30s) ===")
+        last = monitor_inputs(bus, 30)
+        log("")
 
-        if status == 3:
-            log_message(logfile, "Generator appears to be RUNNING (status=3)")
+        # === PHASE 8: CHARGER ENABLE (30 seconds) ===
+        log("=== PHASE 8: IGNITION + CHARGER (30s) ===")
+        set_relays(bus, 0b1010)
+        last = monitor_inputs(bus, 30)
+        log("")
+    else:
+        log("Generator NOT running (expected status=3, got %s)" % str(status))
+        log("Observing for 10 more seconds...")
+        last = monitor_inputs(bus, 10)
+        log("")
 
-            # === PHASE 7: WARMUP (60 seconds) ===
-            log_message(logfile, "")
-            log_message(logfile, "=== PHASE 7: WARMUP - Ignition only (60s) ===")
-            time.sleep(60)
+    # === PHASE 9: SHUTDOWN ===
+    log("=== PHASE 9: SHUTDOWN ===")
+    set_relays(bus, 0b0000)
+    last = monitor_inputs(bus, 10)
+    log("")
 
-            # === PHASE 8: ENABLE CHARGER (30 seconds to observe) ===
-            log_message(logfile, "")
-            log_message(logfile, "=== PHASE 8: IGNITION + CHARGER ENABLE (30s) ===")
-            set_relays(logfile, 0b1010)
-            time.sleep(30)
-
-            # === PHASE 9: RUNNING OBSERVATION (30 more seconds) ===
-            log_message(logfile, "")
-            log_message(logfile, "=== PHASE 9: Continued running observation (30s) ===")
-            time.sleep(30)
-        else:
-            log_message(logfile, "Generator NOT running (status=%d, expected 3)" % status)
-            log_message(logfile, "Keeping ignition on for 10s to observe...")
-            time.sleep(10)
-
-        # === PHASE 10: SHUTDOWN ===
-        log_message(logfile, "")
-        log_message(logfile, "=== PHASE 10: SHUTDOWN - All relays OFF ===")
-        set_relays(logfile, 0b0000)
-
-        # Log for 10 more seconds to capture shutdown transition
-        log_message(logfile, "Logging shutdown transition for 10s...")
-        time.sleep(10)
-
-    except KeyboardInterrupt:
-        log_message(logfile, "INTERRUPTED BY USER")
-    except Exception as e:
-        log_message(logfile, "ERROR: %s" % str(e))
-    finally:
-        # Always ensure safe shutdown
-        logging_active = False
-        log_message(logfile, "")
-        log_message(logfile, "=== EMERGENCY SHUTDOWN - All relays OFF ===")
-        try:
-            BUS.write_byte_data(MODIO_ADDR, REG_RELAY, 0b0000)
-        except:
-            pass
-        log_message(logfile, "=" * 60)
-        log_message(logfile, "DIAGNOSTIC SEQUENCE COMPLETE")
-        log_message(logfile, "=" * 60)
+    log("=" * 60)
+    log("DIAGNOSTIC COMPLETE")
+    log("=" * 60)
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description='Generator input diagnostic - logs input states during start sequence'
-    )
-    parser.add_argument(
-        '--no-start',
-        action='store_true',
-        help='Monitor inputs only, do not control generator relays'
-    )
-    parser.add_argument(
-        '--log-file',
-        default=LOG_FILE,
-        help='Log file path (default: %s)' % LOG_FILE
-    )
-    args = parser.parse_args()
+    # Immediately write heartbeat to prove we started
+    write_heartbeat("Script starting - diagnose_inputs.py v2")
+    write_heartbeat("Python version: %s" % sys.version)
+    write_heartbeat("Working directory: %s" % os.getcwd())
+    write_heartbeat("Script path: %s" % os.path.abspath(__file__))
 
-    print "=" * 60
-    print "Generator Input Diagnostic Script"
-    print "=" * 60
-    print ""
-    print "Log file: %s" % args.log_file
-    print "Generator control: %s" % ("DISABLED" if args.no_start else "ENABLED")
-    print ""
+    # Open log file
+    log_path = open_log()
+    if log_path:
+        log("Log file opened: %s" % log_path)
+    else:
+        write_heartbeat("ERROR: Could not open any log file!")
 
-    if not args.no_start:
-        print "WARNING: This will attempt to START the generator!"
-        print "Press Ctrl+C within 5 seconds to abort..."
+    log("Generator Input Diagnostic Script v2")
+    log("Python: %s" % sys.version)
+    log("")
+
+    # Check for --no-start argument
+    no_start = "--no-start" in sys.argv
+    if no_start:
+        log("MODE: Monitor only (--no-start)")
+    else:
+        log("MODE: Full diagnostic with generator start")
+
+    # Initialize I2C
+    bus, smbus = init_i2c()
+
+    if bus is None:
+        log("FATAL: Cannot communicate with MOD-IO")
+        log("Check I2C bus and MOD-IO connection")
+        write_heartbeat("FATAL: I2C/MOD-IO init failed")
+        return 1
+
+    try:
+        if no_start:
+            log("Monitoring inputs for 120 seconds...")
+            log("Manually operate generator to observe input changes")
+            monitor_inputs(bus, 120)
+        else:
+            run_diagnostic(bus)
+    except KeyboardInterrupt:
+        log("Interrupted by user")
+    except Exception as e:
+        log("ERROR: %s" % str(e))
+        log("Traceback: %s" % traceback.format_exc())
+        write_heartbeat("ERROR: %s" % str(e))
+    finally:
+        # Always try to shut down relays
+        log("Emergency shutdown - all relays OFF")
         try:
-            time.sleep(5)
-        except KeyboardInterrupt:
-            print "\nAborted."
-            sys.exit(0)
+            bus.write_byte_data(0x58, 0x10, 0b0000)
+        except:
+            pass
 
-    with open(args.log_file, 'w') as logfile:
-        log_message(logfile, "Generator Input Diagnostic Log")
-        log_message(logfile, "Script started")
-        run_diagnostic_sequence(logfile, run_generator=not args.no_start)
+    if logfile:
+        logfile.close()
 
-    print ""
-    print "Log saved to: %s" % args.log_file
-    print "Copy this file for analysis."
+    write_heartbeat("Script completed")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        sys.exit(main())
+    except Exception as e:
+        write_heartbeat("FATAL EXCEPTION: %s" % str(e))
+        write_heartbeat("Traceback: %s" % traceback.format_exc())
+        sys.exit(1)
