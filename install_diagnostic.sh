@@ -6,9 +6,6 @@
 #
 # Example: sudo ./install_diagnostic.sh /mnt/olimex
 #
-# This script copies the diagnostic files to the SD card and enables
-# the systemd service to run automatically on boot.
-#
 
 set -e
 
@@ -16,26 +13,15 @@ if [ -z "$1" ]; then
     echo "Usage: sudo $0 /path/to/mounted/sdcard"
     echo ""
     echo "Example: sudo $0 /mnt/olimex"
-    echo ""
-    echo "First mount the SD card:"
-    echo "  sudo mkdir -p /mnt/olimex"
-    echo "  sudo mount /dev/sdX2 /mnt/olimex    # Replace sdX2 with actual device"
     exit 1
 fi
 
 SDCARD="$1"
 SCRIPT_DIR="$(dirname "$0")"
 
-# Verify mount point looks like an Arch Linux root filesystem
+# Verify mount point
 if [ ! -d "$SDCARD/usr/local/bin" ]; then
-    echo "ERROR: $SDCARD does not appear to be a valid root filesystem"
-    echo "Missing: $SDCARD/usr/local/bin"
-    exit 1
-fi
-
-if [ ! -d "$SDCARD/etc/systemd/system" ]; then
-    echo "ERROR: $SDCARD does not appear to have systemd"
-    echo "Missing: $SDCARD/etc/systemd/system"
+    echo "ERROR: $SDCARD/usr/local/bin does not exist"
     exit 1
 fi
 
@@ -51,18 +37,66 @@ echo "Copying read_inputs.py..."
 cp "$SCRIPT_DIR/read_inputs.py" "$SDCARD/usr/local/bin/"
 chmod 755 "$SDCARD/usr/local/bin/read_inputs.py"
 
-# Copy and enable systemd service
-echo "Copying gen-diagnostic.service..."
-cp "$SCRIPT_DIR/gen-diagnostic.service" "$SDCARD/etc/systemd/system/"
-chmod 644 "$SDCARD/etc/systemd/system/gen-diagnostic.service"
+echo "Copying run_diagnostic_at_boot..."
+cp "$SCRIPT_DIR/run_diagnostic_at_boot" "$SDCARD/usr/local/bin/"
+chmod 755 "$SDCARD/usr/local/bin/run_diagnostic_at_boot"
 
-echo "Enabling service (creating symlink)..."
-mkdir -p "$SDCARD/etc/systemd/system/multi-user.target.wants"
-ln -sf /etc/systemd/system/gen-diagnostic.service \
-    "$SDCARD/etc/systemd/system/multi-user.target.wants/gen-diagnostic.service"
+# Set up cron @reboot job
+echo "Setting up cron @reboot job..."
+CRON_DIR="$SDCARD/var/spool/cron"
+mkdir -p "$CRON_DIR"
+
+# Check for root crontab
+CRONTAB="$CRON_DIR/root"
+if [ -f "$CRONTAB" ]; then
+    # Remove old entry if exists
+    grep -v "run_diagnostic_at_boot" "$CRONTAB" > "$CRONTAB.tmp" || true
+    mv "$CRONTAB.tmp" "$CRONTAB"
+fi
+
+# Add @reboot entry
+echo "@reboot /usr/local/bin/run_diagnostic_at_boot" >> "$CRONTAB"
+chmod 600 "$CRONTAB"
+
+echo "Crontab entry added:"
+cat "$CRONTAB"
+
+# Also try rc.local as backup
+echo ""
+echo "Setting up rc.local as backup..."
+RC_LOCAL="$SDCARD/etc/rc.local"
+
+# Create rc.local if it doesn't exist
+if [ ! -f "$RC_LOCAL" ]; then
+    echo '#!/bin/sh' > "$RC_LOCAL"
+    echo '# rc.local - executed at end of each multiuser runlevel' >> "$RC_LOCAL"
+    echo '' >> "$RC_LOCAL"
+fi
+
+# Check if our line is already there
+if ! grep -q "run_diagnostic_at_boot" "$RC_LOCAL"; then
+    # Add before 'exit 0' if present, otherwise at end
+    if grep -q "^exit 0" "$RC_LOCAL"; then
+        sed -i 's|^exit 0|/usr/local/bin/run_diagnostic_at_boot \&\nexit 0|' "$RC_LOCAL"
+    else
+        echo '/usr/local/bin/run_diagnostic_at_boot &' >> "$RC_LOCAL"
+        echo 'exit 0' >> "$RC_LOCAL"
+    fi
+fi
+chmod 755 "$RC_LOCAL"
+
+echo "rc.local contents:"
+cat "$RC_LOCAL"
+
+# Clean up old systemd service if present
+if [ -f "$SDCARD/etc/systemd/system/gen-diagnostic.service" ]; then
+    echo ""
+    echo "Removing old systemd service..."
+    rm -f "$SDCARD/etc/systemd/system/gen-diagnostic.service"
+    rm -f "$SDCARD/etc/systemd/system/multi-user.target.wants/gen-diagnostic.service"
+fi
 
 # Create log directory
-echo "Creating /var/log directory if needed..."
 mkdir -p "$SDCARD/var/log"
 
 echo ""
@@ -73,31 +107,24 @@ echo ""
 echo "Files installed:"
 echo "  $SDCARD/usr/local/bin/diagnose_inputs.py"
 echo "  $SDCARD/usr/local/bin/read_inputs.py"
-echo "  $SDCARD/etc/systemd/system/gen-diagnostic.service"
+echo "  $SDCARD/usr/local/bin/run_diagnostic_at_boot"
 echo ""
-echo "Service enabled: gen-diagnostic.service"
-echo ""
-echo "On boot, the diagnostic will:"
-echo "  1. Wait 30 seconds for system to stabilize"
-echo "  2. Run the full generator start sequence"
-echo "  3. Log all input states to /var/log/gen_diagnostic.log"
+echo "Boot triggers:"
+echo "  - cron @reboot job (primary)"
+echo "  - rc.local (backup)"
 echo ""
 echo "NEXT STEPS:"
 echo "  1. Unmount: sudo umount $SDCARD"
 echo "  2. Put SD card in Olimex board"
 echo "  3. Connect to generator (key in OFF position)"
-echo "  4. Apply power - diagnostic runs automatically after 30s"
+echo "  4. Apply power - diagnostic runs after ~30s"
 echo "  5. Wait ~3 minutes for sequence to complete"
 echo "  6. Remove power, retrieve SD card"
-echo "  7. Mount SD card again and check these files:"
 echo ""
-echo "DEBUG FILES TO CHECK (in order of importance):"
-echo "  $SDCARD/var/log/gen_service_started.txt <- Proves systemd ran service"
-echo "  $SDCARD/var/log/gen_diag_started.txt    <- Proves Python script ran"
-echo "  $SDCARD/tmp/gen_diag_started.txt        <- Backup heartbeat"
-echo "  $SDCARD/var/log/gen_diagnostic.log      <- Full log"
-echo "  $SDCARD/tmp/gen_diagnostic.log          <- Backup log"
+echo "DEBUG FILES TO CHECK:"
+echo "  $SDCARD/var/log/diag_cron_ran.txt    <- Proves boot script ran"
+echo "  $SDCARD/var/log/gen_diag_started.txt <- Proves Python started"
+echo "  $SDCARD/var/log/gen_diagnostic.log   <- Full diagnostic log"
 echo ""
-echo "KEY POSITION: Leave key in OFF position. The relays control"
-echo "the ignition, starter, etc. The key being ON may interfere."
+echo "KEY POSITION: Leave key in OFF position!"
 echo ""

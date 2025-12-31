@@ -1,0 +1,17 @@
+#!/bin/sh
+# Run generator diagnostic at boot via cron @reboot
+# This script runs once at startup
+
+MARKER="/var/log/diag_cron_ran.txt"
+LOG="/var/log/gen_diagnostic.log"
+
+echo "Cron @reboot triggered at $(date)" > "$MARKER"
+
+# Wait for system to stabilize
+sleep 30
+echo "Sleep complete, starting diagnostic at $(date)" >> "$MARKER"
+
+# Run the diagnostic
+/usr/bin/python2 /usr/local/bin/diagnose_inputs.py >> "$MARKER" 2>&1
+
+echo "Diagnostic finished at $(date)" >> "$MARKER"
