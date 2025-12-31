@@ -175,7 +175,9 @@ def do_start_sequence():
         if inputs == 3:
             log("Generator RUNNING - warming up (60s)")
             time.sleep(60)
-            log("Enabling charger")
+            log("Warmup complete - waiting 20s for AC stabilization")
+            time.sleep(20)
+            log("Enabling charger (REL2)")
             set_relays(0b1010)
             generator_running = True
             start_in_progress = False
@@ -195,12 +197,25 @@ def do_start_sequence():
 
 
 def do_stop():
-    """Stop the generator"""
+    """Stop the generator with cooldown sequence"""
     global generator_running
-    log("Stopping generator")
+
+    log("Stopping generator - beginning cooldown sequence")
+
+    # Step 1: Disconnect charger (REL2), keep ignition on
+    log("Disconnecting charger (REL2 OFF), keeping IGN on")
+    set_relays(0b1000)  # IGN only
+
+    # Step 2: Run at idle for 3 minutes
+    log("Running at idle for 3 minutes cooldown...")
+    time.sleep(180)
+
+    # Step 3: Full shutdown
+    log("Cooldown complete - shutting down")
     set_relays(0b0000)
     generator_running = False
-    return "OK: Generator stopped"
+
+    return "OK: Generator stopped (after 3 min cooldown)"
 
 
 def handle_command(cmd):

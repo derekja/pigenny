@@ -15,6 +15,8 @@ import time
 import sys
 import argparse
 import logging
+import os
+import csv
 from datetime import datetime, timedelta
 
 # Set up logging
@@ -67,7 +69,85 @@ CONFIG = {
 
     # Safety
     'max_start_attempts': 3,      # Max consecutive start failures before giving up
+
+    # Logging
+    'csv_log_dir': '/var/log/pigenny',
+    'csv_log_prefix': 'data_',
+    'log_interval': 600,          # Seconds between CSV log entries (default 10 min)
 }
+
+
+# =============================================================================
+# CSV Logging
+# =============================================================================
+
+class CSVLogger:
+    """Logs data to daily CSV files - opens, writes, closes on each entry"""
+
+    CSV_FIELDS = [
+        'timestamp', 'timestamp_unix', 'soc_pct', 'soh_pct', 'vbat_v',
+        'vpv1_v', 'vpv2_v', 'pv_power_w', 'charge_power_w', 'discharge_power_w',
+        'generator_state', 'generator_running'
+    ]
+
+    def __init__(self, log_dir, prefix='data_'):
+        self.log_dir = log_dir
+        self.prefix = prefix
+        self._ensure_dir()
+
+    def _ensure_dir(self):
+        """Ensure log directory exists"""
+        if not os.path.exists(self.log_dir):
+            try:
+                os.makedirs(self.log_dir)
+                log.info(f"Created log directory: {self.log_dir}")
+            except Exception as e:
+                log.error(f"Failed to create log directory {self.log_dir}: {e}")
+
+    def _get_log_path(self, dt):
+        """Get log file path for a given date (new file each day at midnight)"""
+        date_str = dt.strftime('%Y%m%d')
+        return os.path.join(self.log_dir, f"{self.prefix}{date_str}.csv")
+
+    def log_data(self, inverter_data, generator_state, generator_running):
+        """Log a data row to CSV - opens, writes, and closes file each time"""
+        now = datetime.now()
+        log_path = self._get_log_path(now)
+
+        # Check if file exists to determine if we need header
+        file_exists = os.path.exists(log_path)
+
+        row = {
+            'timestamp': now.strftime('%Y-%m-%dT%H:%M:%S'),
+            'timestamp_unix': int(now.timestamp()),
+            'soc_pct': inverter_data.get('soc', ''),
+            'soh_pct': inverter_data.get('soh', ''),
+            'vbat_v': inverter_data.get('battery_voltage', ''),
+            'vpv1_v': inverter_data.get('pv1_voltage', ''),
+            'vpv2_v': inverter_data.get('pv2_voltage', ''),
+            'pv_power_w': inverter_data.get('pv_power', ''),
+            'charge_power_w': inverter_data.get('charge_power', ''),
+            'discharge_power_w': inverter_data.get('discharge_power', ''),
+            'generator_state': generator_state,
+            'generator_running': 1 if generator_running else 0,
+        }
+
+        try:
+            # Open, write header if needed, write row, close
+            with open(log_path, 'a', newline='') as csvfile:
+                writer = csv.DictWriter(csvfile, fieldnames=self.CSV_FIELDS)
+                if not file_exists:
+                    writer.writeheader()
+                    log.info(f"Created new log file: {log_path}")
+                writer.writerow(row)
+            return True
+        except Exception as e:
+            log.error(f"Failed to write CSV row to {log_path}: {e}")
+            return False
+
+    def close(self):
+        """No-op since we open/close on each write"""
+        pass
 
 
 # =============================================================================
@@ -215,6 +295,14 @@ class PiGennyMonitor:
             config['generator_port']
         )
 
+        # CSV logging
+        self.csv_logger = CSVLogger(
+            config['csv_log_dir'],
+            config['csv_log_prefix']
+        )
+        self.log_interval = config['log_interval']
+        self.last_log_time = None
+
         # Timing
         self.generator_started_at = None
         self.generator_stopped_at = None
@@ -245,6 +333,7 @@ class PiGennyMonitor:
         """Disconnect from all"""
         self.inverter.disconnect()
         self.generator.disconnect()
+        self.csv_logger.close()
 
     def get_generator_status(self):
         """Get current generator status"""
@@ -334,6 +423,22 @@ class PiGennyMonitor:
             log.info(f"SOC: {data['soc']}% | Voltage: {data['battery_voltage']}V | "
                     f"PV: {data['pv_power']}W | Charge: {data['charge_power']}W | "
                     f"Discharge: {data['discharge_power']}W")
+
+            # Log to CSV at specified interval
+            now = datetime.now()
+            should_log = False
+            if self.last_log_time is None:
+                should_log = True  # First log
+            else:
+                elapsed = (now - self.last_log_time).total_seconds()
+                if elapsed >= self.log_interval:
+                    should_log = True
+
+            if should_log:
+                generator_running = self.is_generator_running()
+                self.csv_logger.log_data(data, self.state, generator_running)
+                self.last_log_time = now
+                log.info(f"CSV logged (next in {self.log_interval}s)")
         else:
             log.warning("Failed to read inverter data")
             return
@@ -371,6 +476,9 @@ class PiGennyMonitor:
         log.info("Starting PiGenny monitor...")
         log.info(f"SOC thresholds: start < {self.config['soc_start_threshold']}%, "
                 f"stop >= {self.config['soc_stop_threshold']}%")
+        log.info(f"Poll interval: {self.config['poll_interval']}s, "
+                f"CSV log interval: {self.log_interval}s ({self.log_interval/60:.0f} min)")
+        log.info(f"CSV log directory: {self.config['csv_log_dir']}")
 
         if not self.connect():
             return 1
@@ -467,6 +575,10 @@ def main():
                        help=f"SOC threshold to start generator (default: {CONFIG['soc_start_threshold']})")
     parser.add_argument('--soc-stop', type=int, default=CONFIG['soc_stop_threshold'],
                        help=f"SOC threshold to stop generator (default: {CONFIG['soc_stop_threshold']})")
+    parser.add_argument('--log-dir', default=CONFIG['csv_log_dir'],
+                       help=f"CSV log directory (default: {CONFIG['csv_log_dir']})")
+    parser.add_argument('--log-interval', type=int, default=CONFIG['log_interval'],
+                       help=f"Seconds between CSV log entries (default: {CONFIG['log_interval']} = 10 min)")
     args = parser.parse_args()
 
     # Update config from args
@@ -476,6 +588,8 @@ def main():
     config['generator_host'] = args.generator_host
     config['soc_start_threshold'] = args.soc_start
     config['soc_stop_threshold'] = args.soc_stop
+    config['csv_log_dir'] = args.log_dir
+    config['log_interval'] = args.log_interval
 
     if args.test_inverter:
         return test_inverter(config)

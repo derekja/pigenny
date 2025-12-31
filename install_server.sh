@@ -97,6 +97,62 @@ cat "$RC_LOCAL"
 # Create log file location
 mkdir -p "$SDCARD/var/log"
 
+# Disable firewall for SSH access
+echo ""
+echo "Disabling firewall..."
+
+# Disable iptables services if they exist
+for svc in iptables ip6tables; do
+    if [ -L "$SDCARD/etc/systemd/system/multi-user.target.wants/${svc}.service" ]; then
+        rm -f "$SDCARD/etc/systemd/system/multi-user.target.wants/${svc}.service"
+        echo "  Disabled ${svc}.service"
+    fi
+done
+
+# Clear any saved iptables rules
+for rules_file in "$SDCARD/etc/iptables/iptables.rules" "$SDCARD/etc/iptables/ip6tables.rules"; do
+    if [ -f "$rules_file" ]; then
+        cat > "$rules_file" << 'EOF'
+*filter
+:INPUT ACCEPT [0:0]
+:FORWARD ACCEPT [0:0]
+:OUTPUT ACCEPT [0:0]
+COMMIT
+EOF
+        echo "  Cleared $(basename $rules_file)"
+    fi
+done
+
+# Create a boot script to ensure firewall is flushed
+cat > "$SDCARD/usr/local/bin/disable_firewall.sh" << 'EOF'
+#!/bin/sh
+# Ensure firewall is disabled at boot
+iptables -F 2>/dev/null
+iptables -X 2>/dev/null
+iptables -P INPUT ACCEPT 2>/dev/null
+iptables -P FORWARD ACCEPT 2>/dev/null
+iptables -P OUTPUT ACCEPT 2>/dev/null
+ip6tables -F 2>/dev/null
+ip6tables -X 2>/dev/null
+ip6tables -P INPUT ACCEPT 2>/dev/null
+ip6tables -P FORWARD ACCEPT 2>/dev/null
+ip6tables -P OUTPUT ACCEPT 2>/dev/null
+EOF
+chmod 755 "$SDCARD/usr/local/bin/disable_firewall.sh"
+
+# Add to crontab for @reboot
+CRONTAB="$SDCARD/var/spool/cron/root"
+mkdir -p "$(dirname "$CRONTAB")"
+if [ ! -f "$CRONTAB" ]; then
+    touch "$CRONTAB"
+fi
+if ! grep -q "disable_firewall" "$CRONTAB" 2>/dev/null; then
+    echo "@reboot /usr/local/bin/disable_firewall.sh" >> "$CRONTAB"
+    echo "  Added firewall disable to cron @reboot"
+fi
+
+echo "Firewall disabled for SSH access"
+
 # Configure static IP if specified
 if [ -n "$STATIC_IP" ]; then
     echo ""
