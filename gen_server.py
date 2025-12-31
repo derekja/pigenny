@@ -267,18 +267,18 @@ def handle_client(client_socket, address):
     log("Client connected: %s:%d" % address)
 
     try:
-        client_socket.sendall("GENNY SERVER READY\n")
+        client_socket.sendall(b"GENNY SERVER READY\n")
 
-        buffer = ""
+        buffer = b""
         while True:
             data = client_socket.recv(1024)
             if not data:
                 break
 
             buffer += data
-            while "\n" in buffer:
-                line, buffer = buffer.split("\n", 1)
-                line = line.strip()
+            while b"\n" in buffer:
+                line, buffer = buffer.split(b"\n", 1)
+                line = line.decode('utf-8', errors='ignore').strip()
                 if not line:
                     continue
 
@@ -286,10 +286,10 @@ def handle_client(client_socket, address):
                 response = handle_command(line)
 
                 if response is None:
-                    client_socket.sendall("BYE\n")
+                    client_socket.sendall(b"BYE\n")
                     return
 
-                client_socket.sendall(response + "\n")
+                client_socket.sendall((response + "\n").encode('utf-8'))
 
     except socket.error as e:
         log("Socket error with %s: %s" % (address[0], str(e)))
