@@ -59,11 +59,11 @@ This system monitors battery state of charge via RS-485 Modbus communication wit
 │  │  Pin 15 (GPIO22) ─────────────────► Relay 3 (GLOW)        │  │
 │  │  Pin 16 (GPIO23) ─────────────────► Relay 4 (IGN/RUN)     │  │
 │  │                                                            │  │
-│  │  GENERATOR STATUS INPUTS:                                  │  │
-│  │  Pin 18 (GPIO24) ◄──────────────── Gen Running 1 (IN1)    │  │
-│  │  Pin 22 (GPIO25) ◄──────────────── Gen Running 2 (IN2)    │  │
-│  │  Pin 24 (GPIO8)  ◄──────────────── Gen Status 3 (IN3)     │  │
-│  │  Pin 26 (GPIO7)  ◄──────────────── Gen Status 4 (IN4)     │  │
+│  │  GENERATOR STATUS INPUTS (accent Optoisolator):              │  │
+│  │  Pin 18 (GPIO24) ◄── [OPTO] ◄──── IN1 Engine Running      │  │
+│  │  Pin 22 (GPIO25) ◄── [OPTO] ◄──── IN2 Ignition Active     │  │
+│  │  Pin 26 (GPIO7)  ◄── [OPTO] ◄──── IN4 Starter Engaged     │  │
+│  │                                   (IN3 unused - not connected)│  │
 │  │                                                            │  │
 │  │  AC CONFIRMATION (future):                                 │  │
 │  │  Pin 29 (GPIO5)  ◄──────────────── Supco Relay (240VAC)   │  │
@@ -78,7 +78,7 @@ This system monitors battery state of charge via RS-485 Modbus communication wit
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-**Note**: Generator status inputs may require optoisolation or level shifting depending on signal voltage.
+**Important**: Generator status inputs MUST go through an optoisolator module (e.g., PC817-based 4-channel board) to protect the Pi's 3.3V GPIO from the generator's signal voltage.
 
 ---
 
@@ -120,55 +120,78 @@ This will allow the software to:
 
 The existing system uses an Olimex MOD-IO board with **4 optoisolated inputs** (IN1-IN4) connected to generator status signals. Register 0x20 returns the input state as a bitmask.
 
-### Generator Signal Connections
+### Generator Signal Connections (Confirmed)
 
-| Input | Wire Color | Suspected Function | Notes |
-|-------|------------|-------------------|-------|
-| IN1 | Blue-black | Running indicator 1 | Active when running |
-| IN2 | Blue | Running indicator 2 | Active when running |
-| IN3 | Blue-white | Unknown | Not active in normal operation |
-| IN4 | Green-black | Unknown | Not active in normal operation |
+Diagnostic test performed 2024-12-30 confirmed the following input mappings:
+
+| Input | Wire Color | Function | Behavior |
+|-------|------------|----------|----------|
+| IN1 | Blue-black | **Engine Running** | Goes HIGH when engine catches, stays HIGH while running |
+| IN2 | Blue | **Ignition Circuit Active** | Goes HIGH immediately when IGN relay energized |
+| IN3 | Blue-white | Unused | Never activated during normal operation |
+| IN4 | Green-black | **Starter Motor Engaged** | HIGH only while starter is cranking |
 
 All inputs share generator black (ground) on the common terminal.
+
+### Diagnostic Test Timeline
+
+```
+Time        Relay State     Status  Inputs          Event
+────────────────────────────────────────────────────────────────
+14:48:00    OFF             0       none            Baseline
+14:48:10    IGN             2       IN2             Fuel solenoid energized
+14:48:15    IGN+START       2       IN2             Cranking begins
+14:48:20    IGN+START       10      IN2+IN4         Starter signal detected
+14:48:26    IGN+GLOW+START  11      IN1+IN2+IN4     ENGINE CATCHES
+14:48:28    IGN             3       IN1+IN2         Running, starter released
+14:48:33    IGN             3       IN1+IN2         Confirmed running
+14:49:03    IGN+CHARGER     3       IN1+IN2         Charger enabled
+```
 
 ### Status Interpretation
 
 | Status Value | Binary | Active Inputs | Generator State |
 |--------------|--------|---------------|-----------------|
 | 0 | 0b0000 | None | Off/Idle |
-| 3 | 0b0011 | IN1 + IN2 | Running |
+| 2 | 0b0010 | IN2 | Ignition on, engine not running |
+| 3 | 0b0011 | IN1 + IN2 | **Running** |
+| 10 | 0b1010 | IN2 + IN4 | Cranking (starter engaged) |
+| 11 | 0b1011 | IN1 + IN2 + IN4 | Engine catching (starter still engaged) |
 
-The code checks for status == 3 to confirm the generator has started successfully.
+The code checks for `status == 3` to confirm the generator has started successfully (IN1 engine running + IN2 ignition active).
 
-### Likely Signal Sources
+### Signal Sources
 
-Based on typical diesel generator instrumentation:
-- **IN1**: Oil pressure switch (closes when adequate pressure)
-- **IN2**: Alternator/charging indicator or RPM threshold
-- **IN3/IN4**: May be fault indicators or unused
+Based on diagnostic results:
+- **IN1**: Oil pressure switch or tachometer signal - indicates engine is actually running
+- **IN2**: Ignition/fuel solenoid circuit feedback - confirms relay activated the circuit
+- **IN3**: Not connected or fault indicator (never activated)
+- **IN4**: Starter motor engagement feedback - useful for detecting crank issues
 
 ### Pi Implementation Requirements
 
-To replicate this functionality on the Raspberry Pi, additional GPIO inputs are needed:
+To replicate this functionality on the Raspberry Pi, GPIO inputs are needed for the generator status signals:
 
-| Pi GPIO | Physical Pin | Function |
-|---------|--------------|----------|
-| GPIO24 | 18 | Generator Running 1 (IN1 equivalent) |
-| GPIO25 | 22 | Generator Running 2 (IN2 equivalent) |
-| GPIO8 | 24 | Generator Status 3 (IN3 equivalent, optional) |
-| GPIO7 | 26 | Generator Status 4 (IN4 equivalent, optional) |
+| Pi GPIO | Physical Pin | Generator Signal | Required |
+|---------|--------------|------------------|----------|
+| GPIO24 | 18 | IN1 - Engine Running | **Yes** |
+| GPIO25 | 22 | IN2 - Ignition Active | **Yes** |
+| GPIO7 | 26 | IN4 - Starter Engaged | Optional (useful for diagnostics) |
 
-**Note**: The generator signals may require voltage level shifting or optoisolation depending on the signal voltage levels from the generator.
+**Note**: IN3 is unused and does not need to be connected.
+
+**Important**: The generator signals require **optoisolation** to safely interface with Pi GPIO (3.3V). The existing MOD-IO board has built-in optoisolated inputs. For the Pi, use a 4-channel optocoupler module (e.g., PC817-based board) between the generator signals and the Pi GPIO.
 
 ### Status Detection Logic
 
 ```python
 import RPi.GPIO as GPIO
 
-# Input pin configuration
+# Input pin configuration (accent optoisolator module between generator and Pi)
 INPUT_PINS = {
-    'running_1': 24,  # BCM GPIO24
-    'running_2': 25,  # BCM GPIO25
+    'engine_running': 24,   # BCM GPIO24 - IN1: Oil pressure/tach (HIGH = running)
+    'ignition_active': 25,  # BCM GPIO25 - IN2: Ignition circuit (HIGH = energized)
+    'starter_engaged': 7,   # BCM GPIO7  - IN4: Starter motor (HIGH = cranking)
 }
 
 def setup_inputs():
@@ -176,29 +199,53 @@ def setup_inputs():
         GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
 
 def is_generator_running():
-    """Returns True if generator is confirmed running (both signals active)"""
-    in1 = GPIO.input(INPUT_PINS['running_1'])
-    in2 = GPIO.input(INPUT_PINS['running_2'])
-    return in1 == GPIO.HIGH and in2 == GPIO.HIGH
+    """
+    Returns True if generator is confirmed running.
+    Requires both engine_running (IN1) AND ignition_active (IN2) to be HIGH.
+    This matches the original Olimex logic: status == 3
+    """
+    engine = GPIO.input(INPUT_PINS['engine_running'])
+    ignition = GPIO.input(INPUT_PINS['ignition_active'])
+    return engine == GPIO.HIGH and ignition == GPIO.HIGH
 
 def get_status_byte():
     """Returns status byte compatible with original Olimex implementation"""
     status = 0
-    if GPIO.input(INPUT_PINS['running_1']):
-        status |= 0b0001
-    if GPIO.input(INPUT_PINS['running_2']):
-        status |= 0b0010
+    if GPIO.input(INPUT_PINS['engine_running']):
+        status |= 0b0001  # IN1
+    if GPIO.input(INPUT_PINS['ignition_active']):
+        status |= 0b0010  # IN2
+    if GPIO.input(INPUT_PINS['starter_engaged']):
+        status |= 0b1000  # IN4
     return status
+
+def get_generator_state():
+    """Returns human-readable generator state"""
+    status = get_status_byte()
+    if status == 0:
+        return "OFF"
+    elif status == 2:
+        return "IGNITION_ON"  # Fuel solenoid energized, not running
+    elif status == 3:
+        return "RUNNING"      # Engine running normally
+    elif status == 10:
+        return "CRANKING"     # Starter engaged, not caught yet
+    elif status == 11:
+        return "STARTING"     # Engine catching, starter still engaged
+    else:
+        return "UNKNOWN_%d" % status
 ```
 
-### Signal Identification (Pre-Migration)
+### Signal Identification (Completed)
 
-Before disconnecting the Olimex system, run a diagnostic test to identify signals:
+Diagnostic test completed 2024-12-30 using `diagnose_inputs.py` on the Olimex system. The test:
 
-1. Log input states every 100ms during a start sequence
-2. Correlate state transitions with generator behavior
-3. Document exact timing of each signal
-4. Trace wires to identify physical connections on generator
+1. Logged input states every 100ms during a full start sequence
+2. Correlated state transitions with generator behavior
+3. Documented exact timing of each signal change
+4. Confirmed wire color to function mapping
+
+Results are documented in the "Generator Signal Connections (Confirmed)" section above.
 
 ---
 
