@@ -120,7 +120,7 @@ class InverterMonitor:
 
         try:
             # Register 5 contains SOC in low byte (based on earlier analysis)
-            result = self.client.read_input_registers(5, 1, slave=self.slave_id)
+            result = self.client.read_input_registers(5, count=1, slave=self.slave_id)
             if result.isError():
                 log.error(f"Modbus read error: {result}")
                 return None
@@ -140,7 +140,7 @@ class InverterMonitor:
 
         try:
             # Register 4 contains battery voltage (value / 10)
-            result = self.client.read_input_registers(4, 1, slave=self.slave_id)
+            result = self.client.read_input_registers(4, count=1, slave=self.slave_id)
             if result.isError():
                 return None
 
@@ -159,7 +159,7 @@ class InverterMonitor:
 
         try:
             # Read registers 0-20 in one batch
-            result = self.client.read_input_registers(0, 20, slave=self.slave_id)
+            result = self.client.read_input_registers(0, count=20, slave=self.slave_id)
             if result.isError():
                 log.error(f"Modbus read error: {result}")
                 return None
