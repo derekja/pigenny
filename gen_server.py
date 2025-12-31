@@ -267,18 +267,23 @@ def handle_client(client_socket, address):
     log("Client connected: %s:%d" % address)
 
     try:
-        client_socket.sendall(b"GENNY SERVER READY\n")
+        log("Sending welcome...")
+        client_socket.sendall("GENNY SERVER READY\n".encode('utf-8'))
+        log("Welcome sent, waiting for commands...")
 
         buffer = b""
         while True:
             data = client_socket.recv(1024)
             if not data:
+                log("Client closed connection")
                 break
 
-            buffer += data
+            log("Received %d bytes" % len(data))
+            buffer = buffer + data
+
             while b"\n" in buffer:
-                line, buffer = buffer.split(b"\n", 1)
-                line = line.decode('utf-8', errors='ignore').strip()
+                line_bytes, buffer = buffer.split(b"\n", 1)
+                line = line_bytes.decode('utf-8', errors='ignore').strip()
                 if not line:
                     continue
 
@@ -286,15 +291,18 @@ def handle_client(client_socket, address):
                 response = handle_command(line)
 
                 if response is None:
-                    client_socket.sendall(b"BYE\n")
+                    client_socket.sendall("BYE\n".encode('utf-8'))
                     return
 
-                client_socket.sendall((response + "\n").encode('utf-8'))
+                response_bytes = (response + "\n").encode('utf-8')
+                client_socket.sendall(response_bytes)
 
     except socket.error as e:
         log("Socket error with %s: %s" % (address[0], str(e)))
     except Exception as e:
+        import traceback
         log("Error with %s: %s" % (address[0], str(e)))
+        log("Traceback: %s" % traceback.format_exc())
     finally:
         log("Client disconnected: %s:%d" % address)
         client_socket.close()
