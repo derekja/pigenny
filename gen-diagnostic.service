@@ -1,0 +1,15 @@
+[Unit]
+Description=Generator Input Diagnostic
+After=multi-user.target
+Wants=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStartPre=/bin/sleep 30
+ExecStart=/usr/bin/python2 /usr/local/bin/diagnose_inputs.py --log-file /var/log/gen_diagnostic.log
+RemainAfterExit=yes
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
