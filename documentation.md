@@ -1,251 +1,179 @@
-# PiGenny - Raspberry Pi Generator Controller
+# PiGenny - Hybrid Generator Controller
 
-Generator autostart system for solar-powered battery backup using a Raspberry Pi 4B.
+Generator autostart system for solar-powered battery backup using a Raspberry Pi 4B and Olimex iMX233-OLinuXino.
 
 ## Overview
 
 This system monitors battery state of charge via RS-485 Modbus communication with a LuxPower/GSL inverter and automatically starts a backup generator when battery levels drop below a threshold.
 
----
+### Architecture
 
-## Hardware
-
-### Components
-
-| Component | Model | Purpose |
-|-----------|-------|---------|
-| Single Board Computer | Raspberry Pi 4B (2GB+ RAM) | Main controller |
-| RS-485 Interface | Waveshare RS485 HAT | Inverter communication |
-| Relay Board | Elegoo 4-channel 5V DC relay | Generator control signals |
-| Optoisolator (TBD) | 4-channel optocoupler module | Generator status inputs |
-| Storage | 32GB+ microSD | OS and data |
-| Power Supply | 5V 3A USB-C | Pi power |
-
-**Note**: The optoisolator is needed to safely interface generator status signals (potentially 12V or higher) with Pi GPIO (3.3V). The existing Olimex MOD-IO has built-in optoisolated inputs.
-
-### Relay Assignments
-
-| Relay | Bit | Function | Destination | Notes |
-|-------|-----|----------|-------------|-------|
-| REL1 | 0 (0b0001) | Starter Motor | Generator | Cranking relay |
-| REL2 | 1 (0b0010) | Charger Power Enable | 45EG20AG coil (24VAC) | Enables charger after AC stable |
-| REL3 | 2 (0b0100) | Glow Plugs | Generator | Diesel preheat (2s during crank) |
-| REL4 | 3 (0b1000) | Ignition/Run/Fuel | Generator | Main run enable, fuel solenoid |
-
-### GPIO Pin Mapping
-
-| Relay | BCM GPIO | Physical Pin | Function |
-|-------|----------|--------------|----------|
-| REL1 | GPIO17 | 11 | Starter Motor |
-| REL2 | GPIO27 | 13 | Charger Power Enable |
-| REL3 | GPIO22 | 15 | Glow Plugs |
-| REL4 | GPIO23 | 16 | Ignition/Run/Fuel |
-
-**Note**: Elegoo relay board is **active LOW** - GPIO LOW = relay energized.
-
-### Wiring Diagram
+The system uses a **hybrid architecture** with two boards communicating via direct-wire Ethernet:
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                     Raspberry Pi 4B                              │
-│  ┌───────────────────────────────────────────────────────────┐  │
-│  │                    GPIO Header                             │  │
-│  │                                                            │  │
-│  │  RELAY OUTPUTS (Active LOW):                               │  │
-│  │  Pin 2 (5V) ──────────────────────► Relay Board VCC       │  │
-│  │  Pin 6 (GND) ─────────────────────► Relay Board GND       │  │
-│  │  Pin 11 (GPIO17) ─────────────────► Relay 1 (STARTER)     │  │
-│  │  Pin 13 (GPIO27) ─────────────────► Relay 2 (CHARGER EN)  │  │
-│  │  Pin 15 (GPIO22) ─────────────────► Relay 3 (GLOW)        │  │
-│  │  Pin 16 (GPIO23) ─────────────────► Relay 4 (IGN/RUN)     │  │
-│  │                                                            │  │
-│  │  GENERATOR STATUS INPUTS (accent Optoisolator):              │  │
-│  │  Pin 18 (GPIO24) ◄── [OPTO] ◄──── IN1 Engine Running      │  │
-│  │  Pin 22 (GPIO25) ◄── [OPTO] ◄──── IN2 Ignition Active     │  │
-│  │  Pin 26 (GPIO7)  ◄── [OPTO] ◄──── IN4 Starter Engaged     │  │
-│  │                                   (IN3 unused - not connected)│  │
-│  │                                                            │  │
-│  │  AC CONFIRMATION (future):                                 │  │
-│  │  Pin 29 (GPIO5)  ◄──────────────── Supco Relay (240VAC)   │  │
-│  └───────────────────────────────────────────────────────────┘  │
-│                                                                  │
-│  ┌───────────────────────────────────────────────────────────┐  │
-│  │              Waveshare RS-485 HAT (Stacked)                │  │
-│  │  A/+ ─────────────────────────────► Inverter RS-485 A     │  │
-│  │  B/- ─────────────────────────────► Inverter RS-485 B     │  │
-│  │  GND ─────────────────────────────► Inverter RS-485 GND   │  │
-│  └───────────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              HYBRID ARCHITECTURE                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  ┌──────────────────────────┐         ┌──────────────────────────┐         │
+│  │   Raspberry Pi 4B        │  TCP    │  Olimex iMX233-OLinuXino │         │
+│  │   (10.2.242.1)           │◄───────►│  (10.2.242.109)          │         │
+│  │                          │  :9999  │                          │         │
+│  │  - Inverter monitoring   │         │  - Generator control     │         │
+│  │  - Decision logic        │         │  - I2C relay interface   │         │
+│  │  - CSV data logging      │         │  - Input sensing         │         │
+│  │  - RS-485 to inverter    │         │  - MOD-IO board          │         │
+│  └────────────┬─────────────┘         └────────────┬─────────────┘         │
+│               │                                    │                        │
+│               │ RS-485                             │ I2C                    │
+│               ▼                                    ▼                        │
+│  ┌──────────────────────────┐         ┌──────────────────────────┐         │
+│  │   LuxPower Inverter      │         │   Generator              │         │
+│  │   - Battery SOC          │         │   - Relays (IGN, START,  │         │
+│  │   - PV power             │         │     GLOW, CHARGER)       │         │
+│  │   - Charge/discharge     │         │   - Status inputs        │         │
+│  └──────────────────────────┘         └──────────────────────────┘         │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-**Important**: Generator status inputs MUST go through an optoisolator module (e.g., PC817-based 4-channel board) to protect the Pi's 3.3V GPIO from the generator's signal voltage.
+### Why Hybrid?
+
+- **Olimex**: Low power (~0.5W), proven I2C relay control, optoisolated inputs already wired
+- **Raspberry Pi**: Modern Python 3, easy updates, RS-485 HAT for inverter communication
+- **Direct Ethernet**: Simple, reliable TCP communication between boards
 
 ---
 
-## AC Power Path and Charger Control
+## Network Configuration
 
-### Charger Power Enable Circuit
+### Default IP Addresses
 
-REL2 controls a **45EG20AG coil** driven by a **24VAC signal**. When REL2 is energized:
-1. 24VAC is applied to the 45EG20AG coil
-2. The contactor closes, connecting generator AC to the battery charger
-3. Charger begins operation
+| Device | IP Address | Purpose |
+|--------|------------|---------|
+| Olimex | 10.2.242.109 | Generator control server |
+| Raspberry Pi | 10.2.242.1 | Monitor and control client |
 
-### AC Stabilization
+The Pi and Olimex are connected via **direct-wire Ethernet** (no switch/router needed).
 
-The generator AC output passes through an **external timer relay** that provides approximately **10 seconds of stabilization delay** before power reaches the charger circuit. This ensures:
-- Generator reaches stable operating speed
-- AC voltage and frequency stabilize
-- Prevents charger damage from unstable power
+### Setting Pi Static IP (Temporary)
 
-The software may include an additional short delay as a safety margin.
+```bash
+sudo ip addr add 10.2.242.1/24 dev eth0
+```
 
-### AC Confirmation (Future Enhancement)
+### Setting Pi Static IP (Persistent)
 
-A **Supco relay** will be installed to detect the presence of stable 240VAC:
-- Input: 240VAC from generator (after timer relay)
-- Output: Dry contact closure to Pi GPIO input
-- Purpose: Positive confirmation that AC power is present and stable
+To make the Pi's IP address persist across reboots, edit `/etc/dhcpcd.conf`:
 
-This will allow the software to:
-- Verify generator is actually producing power
-- Detect generator failures during operation
-- Implement more sophisticated control logic
+```bash
+sudo nano /etc/dhcpcd.conf
+```
+
+Add at the end:
+
+```
+# Static IP for direct connection to Olimex
+interface eth0
+static ip_address=10.2.242.1/24
+nolink
+```
+
+The `nolink` option prevents dhcpcd from waiting for a link on eth0 if the Olimex isn't connected.
+
+Then restart networking:
+
+```bash
+sudo systemctl restart dhcpcd
+```
+
+### Verifying Network Connection
+
+```bash
+# From Pi - ping the Olimex
+ping 10.2.242.109
+
+# Test TCP connection
+nc -zv 10.2.242.109 9999
+```
+
+### SSH Access to Olimex
+
+The Olimex has SSH enabled with the following credentials:
+
+| User | Password | Notes |
+|------|----------|-------|
+| `derekja` | `Login123` | Regular user with sudo access |
+| `root` | (may vary) | Root password may have been changed |
+
+**Recommended**: Use the `derekja` account:
+
+```bash
+ssh derekja@10.2.242.109
+```
+
+The `derekja` user is a member of the `wheel` group and can run sudo commands.
+
+**Note**: This system is on an isolated direct-wire network and not exposed to the internet. These credentials are documented for convenience.
 
 ---
 
-## Generator Status Input Sensing
-
-### Current Implementation (Olimex MOD-IO)
-
-The existing system uses an Olimex MOD-IO board with **4 optoisolated inputs** (IN1-IN4) connected to generator status signals. Register 0x20 returns the input state as a bitmask.
-
-### Generator Signal Connections (Confirmed)
-
-Diagnostic test performed 2024-12-30 confirmed the following input mappings:
-
-| Input | Wire Color | Function | Behavior |
-|-------|------------|----------|----------|
-| IN1 | Blue-black | **Engine Running** | Goes HIGH when engine catches, stays HIGH while running |
-| IN2 | Blue | **Ignition Circuit Active** | Goes HIGH immediately when IGN relay energized |
-| IN3 | Blue-white | Unused | Never activated during normal operation |
-| IN4 | Green-black | **Starter Motor Engaged** | HIGH only while starter is cranking |
-
-All inputs share generator black (ground) on the common terminal.
-
-### Diagnostic Test Timeline
+## File Structure
 
 ```
-Time        Relay State     Status  Inputs          Event
-────────────────────────────────────────────────────────────────
-14:48:00    OFF             0       none            Baseline
-14:48:10    IGN             2       IN2             Fuel solenoid energized
-14:48:15    IGN+START       2       IN2             Cranking begins
-14:48:20    IGN+START       10      IN2+IN4         Starter signal detected
-14:48:26    IGN+GLOW+START  11      IN1+IN2+IN4     ENGINE CATCHES
-14:48:28    IGN             3       IN1+IN2         Running, starter released
-14:48:33    IGN             3       IN1+IN2         Confirmed running
-14:49:03    IGN+CHARGER     3       IN1+IN2         Charger enabled
+pigenny/
+├── documentation.md        # This file
+├── gen_server.py           # TCP server for Olimex (Python 2/3 compatible)
+├── gen_client.py           # TCP client for Pi (Python 3)
+├── monitor.py              # Main monitoring daemon with auto-start logic
+├── install_server.sh       # Script to install server to Olimex SD card
+└── luxpower_485/           # Inverter communication tools
+    └── dump_ongoing.py     # Standalone inverter data logger
 ```
 
-### Status Interpretation
+---
 
-| Status Value | Binary | Active Inputs | Generator State |
-|--------------|--------|---------------|-----------------|
-| 0 | 0b0000 | None | Off/Idle |
-| 2 | 0b0010 | IN2 | Ignition on, engine not running |
-| 3 | 0b0011 | IN1 + IN2 | **Running** |
-| 10 | 0b1010 | IN2 + IN4 | Cranking (starter engaged) |
-| 11 | 0b1011 | IN1 + IN2 + IN4 | Engine catching (starter still engaged) |
+## Olimex Generator Server (gen_server.py)
 
-The code checks for `status == 3` to confirm the generator has started successfully (IN1 engine running + IN2 ignition active).
+The Olimex runs a TCP server that accepts commands to control the generator.
 
-### Signal Sources
+### Commands
 
-Based on diagnostic results:
-- **IN1**: Oil pressure switch or tachometer signal - indicates engine is actually running
-- **IN2**: Ignition/fuel solenoid circuit feedback - confirms relay activated the circuit
-- **IN3**: Not connected or fault indicator (never activated)
-- **IN4**: Starter motor engagement feedback - useful for detecting crank issues
+| Command | Description | Response |
+|---------|-------------|----------|
+| `PING` | Connection test | `PONG` |
+| `STATUS` | Full status report | Multi-line status |
+| `INPUTS` | Read input states only | `IN1=x IN2=x IN3=x IN4=x raw=x` |
+| `START` | Start generator sequence | `OK: Generator started...` or `ERROR: ...` |
+| `STOP` | Stop generator (with cooldown) | `OK: Generator stopped...` |
+| `RELAY xx` | Set relay byte directly (hex) | `OK: Relays set to 0xXX` |
+| `HELP` | List commands | Command list |
+| `QUIT` | Close connection | `BYE` |
 
-### Pi Implementation Requirements
+### Server Port
 
-To replicate this functionality on the Raspberry Pi, GPIO inputs are needed for the generator status signals:
+The server listens on **port 9999** on all interfaces.
 
-| Pi GPIO | Physical Pin | Generator Signal | Required |
-|---------|--------------|------------------|----------|
-| GPIO24 | 18 | IN1 - Engine Running | **Yes** |
-| GPIO25 | 22 | IN2 - Ignition Active | **Yes** |
-| GPIO7 | 26 | IN4 - Starter Engaged | Optional (useful for diagnostics) |
+---
 
-**Note**: IN3 is unused and does not need to be connected.
+## Relay Assignments
 
-**Important**: The generator signals require **optoisolation** to safely interface with Pi GPIO (3.3V). The existing MOD-IO board has built-in optoisolated inputs. For the Pi, use a 4-channel optocoupler module (e.g., PC817-based board) between the generator signals and the Pi GPIO.
+| Relay | Bit | Hex | Function | Notes |
+|-------|-----|-----|----------|-------|
+| REL1 | 0 | 0x01 | Starter Motor | Cranking relay |
+| REL2 | 1 | 0x02 | Charger Enable | 45EG20AG coil (24VAC) |
+| REL3 | 2 | 0x04 | Glow Plugs | Diesel preheat |
+| REL4 | 3 | 0x08 | Ignition/Run/Fuel | Main run enable |
 
-### Status Detection Logic
+### Common Relay States
 
-```python
-import RPi.GPIO as GPIO
-
-# Input pin configuration (accent optoisolator module between generator and Pi)
-INPUT_PINS = {
-    'engine_running': 24,   # BCM GPIO24 - IN1: Oil pressure/tach (HIGH = running)
-    'ignition_active': 25,  # BCM GPIO25 - IN2: Ignition circuit (HIGH = energized)
-    'starter_engaged': 7,   # BCM GPIO7  - IN4: Starter motor (HIGH = cranking)
-}
-
-def setup_inputs():
-    for pin in INPUT_PINS.values():
-        GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
-
-def is_generator_running():
-    """
-    Returns True if generator is confirmed running.
-    Requires both engine_running (IN1) AND ignition_active (IN2) to be HIGH.
-    This matches the original Olimex logic: status == 3
-    """
-    engine = GPIO.input(INPUT_PINS['engine_running'])
-    ignition = GPIO.input(INPUT_PINS['ignition_active'])
-    return engine == GPIO.HIGH and ignition == GPIO.HIGH
-
-def get_status_byte():
-    """Returns status byte compatible with original Olimex implementation"""
-    status = 0
-    if GPIO.input(INPUT_PINS['engine_running']):
-        status |= 0b0001  # IN1
-    if GPIO.input(INPUT_PINS['ignition_active']):
-        status |= 0b0010  # IN2
-    if GPIO.input(INPUT_PINS['starter_engaged']):
-        status |= 0b1000  # IN4
-    return status
-
-def get_generator_state():
-    """Returns human-readable generator state"""
-    status = get_status_byte()
-    if status == 0:
-        return "OFF"
-    elif status == 2:
-        return "IGNITION_ON"  # Fuel solenoid energized, not running
-    elif status == 3:
-        return "RUNNING"      # Engine running normally
-    elif status == 10:
-        return "CRANKING"     # Starter engaged, not caught yet
-    elif status == 11:
-        return "STARTING"     # Engine catching, starter still engaged
-    else:
-        return "UNKNOWN_%d" % status
-```
-
-### Signal Identification (Completed)
-
-Diagnostic test completed 2024-12-30 using `diagnose_inputs.py` on the Olimex system. The test:
-
-1. Logged input states every 100ms during a full start sequence
-2. Correlated state transitions with generator behavior
-3. Documented exact timing of each signal change
-4. Confirmed wire color to function mapping
-
-Results are documented in the "Generator Signal Connections (Confirmed)" section above.
+| State | Binary | Hex | Active Relays |
+|-------|--------|-----|---------------|
+| OFF | 0b0000 | 0x00 | None |
+| IGN only | 0b1000 | 0x08 | REL4 (Ignition) |
+| Cranking | 0b1001 | 0x09 | REL4 + REL1 (IGN + Starter) |
+| Glow+Crank | 0b1101 | 0x0D | REL4 + REL3 + REL1 |
+| Running+Charger | 0b1010 | 0x0A | REL4 + REL2 (IGN + Charger) |
 
 ---
 
@@ -254,49 +182,273 @@ Results are documented in the "Generator Signal Connections (Confirmed)" section
 ### Timing Diagram
 
 ```
-Time(s)  Relays      Binary   Action
-─────────────────────────────────────────────────────────────
-  0.0    All OFF     0b0000   RESET: All relays off
-  1.0    IGN         0b1000   IGNITION ON (fuel solenoid energized)
+Time(s)  Relays           Binary   Action
+─────────────────────────────────────────────────────────────────
+  0.0    All OFF          0b0000   RESET: All relays off
+  1.0    IGN              0b1000   IGNITION ON (fuel solenoid)
 
-  1.0+   IGN+START   0b1001   IGNITION + CRANK START
- 11.0                         (10 second crank attempt)
+  1.5    IGN+START        0b1001   Begin cranking
+ 11.5                              (10 second crank attempt)
 
- 11.0    IGN+GLOW    0b1101   IGNITION + GLOW PLUGS + CRANK
- 13.0    +START               (2 second glow-assisted crank)
+ 11.5    IGN+GLOW+START   0b1101   Add glow plugs
+ 13.5                              (2 second glow-assisted crank)
 
- 13.0    IGN         0b1000   IGNITION ONLY (crank released)
- 17.0                         (4 second coast/check)
+ 13.5    IGN              0b1000   Release starter, coast
+ 17.5                              (4 second coast/check)
 
- 17.0    Check if running
-         ├─ IF running:
-         │   └─ Sleep 60s warmup period
-         │       └─ IGN+CHARGER  0b1010   Enable charger power
-         │           Return SUCCESS
+ 17.5    Check status (inputs == 3?)
          │
-         └─ ELSE: Start failed
-             └─ All OFF  0b0000   Emergency shutdown
-                 Return FAILURE
+         ├─ IF RUNNING (status == 3):
+         │   17.5-77.5   IGN        0b1000   60s warmup
+         │   77.5-97.5   IGN        0b1000   20s AC stabilization ◄── NEW
+         │   97.5+       IGN+CHRG   0b1010   Enable charger (REL2)
+         │               Return "OK: Generator started and charger enabled"
+         │
+         └─ IF NOT RUNNING:
+             All OFF      0b0000   Emergency shutdown
+             Return "ERROR: Generator failed to start"
 ```
 
-### Phase Details
+### Key Timing Notes
 
-| Phase | Duration | Relays | Purpose |
-|-------|----------|--------|---------|
-| Reset | 1s | All OFF | Clean state |
-| Fuel Enable | 0.5s | IGN | Energize fuel solenoid |
-| Initial Crank | 10s | IGN + START | First crank attempt |
-| Glow Crank | 2s | IGN + GLOW + START | Glow-assisted cranking |
-| Coast/Check | 4s | IGN | Release starter, verify running |
-| Warmup | 60s | IGN | Let engine reach operating temp |
-| Running | Continuous | IGN + CHARGER | Enable charger, maintain run |
+- **Charger Enable Delay**: 20 seconds after generator shows RUNNING status
+  - Allows AC voltage and frequency to fully stabilize
+  - Protects charger from power fluctuations
+  - Total time from running detection to charger: 60s warmup + 20s stabilization = 80s
 
-### Shutdown
+---
 
-All relays OFF immediately:
-- Fuel solenoid closes (engine starves)
-- Charger disconnected
-- Engine coasts to stop
+## Generator Stop Sequence (Cooldown)
+
+When STOP is issued, the generator goes through a **3-minute cooldown**:
+
+```
+Time(s)  Relays      Binary   Action
+─────────────────────────────────────────────────────────────
+  0.0    IGN         0b1000   Disconnect charger (REL2 OFF)
+                              Keep ignition on, engine runs at idle
+
+  0-180  IGN         0b1000   3 minute idle cooldown
+                              (allows engine to cool gradually)
+
+180.0    All OFF     0b0000   Full shutdown
+                              (fuel solenoid closes, engine stops)
+```
+
+### Why Cooldown?
+
+- Prevents thermal shock to turbocharger (if equipped)
+- Allows engine oil to circulate and cool bearings
+- Reduces wear on engine components
+- Standard practice for diesel generators
+
+---
+
+## Generator Status Inputs
+
+The Olimex MOD-IO reads generator status via 4 optoisolated inputs.
+
+### Input Mapping (Confirmed)
+
+| Input | Wire Color | Function | Behavior |
+|-------|------------|----------|----------|
+| IN1 | Blue-black | Engine Running | HIGH when engine catches |
+| IN2 | Blue | Ignition Active | HIGH when IGN relay energized |
+| IN3 | Blue-white | Unused | Never activated |
+| IN4 | Green-black | Starter Engaged | HIGH while cranking |
+
+### Status Byte Values
+
+| Value | Binary | Inputs Active | Generator State |
+|-------|--------|---------------|-----------------|
+| 0 | 0b0000 | None | Off/Idle |
+| 2 | 0b0010 | IN2 | Ignition on, not running |
+| 3 | 0b0011 | IN1 + IN2 | **RUNNING** |
+| 10 | 0b1010 | IN2 + IN4 | Cranking |
+| 11 | 0b1011 | IN1 + IN2 + IN4 | Engine catching |
+
+The code checks `status == 3` to confirm the generator has started successfully.
+
+---
+
+## Pi Monitor (monitor.py)
+
+The monitor runs on the Raspberry Pi and:
+1. Reads battery SOC from the inverter via RS-485 Modbus
+2. Sends START/STOP commands to the Olimex via TCP
+3. Logs data to CSV files
+
+### Command Line Options
+
+```
+usage: monitor.py [-h] [--test-inverter] [--test-generator]
+                  [--inverter-port PORT] [--inverter-baud BAUD]
+                  [--generator-host HOST] [--soc-start PCT] [--soc-stop PCT]
+                  [--log-dir DIR] [--log-interval SEC]
+
+Options:
+  --test-inverter       Test inverter connection only
+  --test-generator      Test generator connection only
+  --inverter-port PORT  Inverter serial port (default: /dev/ttySC1)
+  --inverter-baud BAUD  Inverter baud rate (default: 19200)
+  --generator-host HOST Generator server host (default: 10.2.242.109)
+  --soc-start PCT       SOC threshold to start generator (default: 25)
+  --soc-stop PCT        SOC threshold to stop generator (default: 80)
+  --log-dir DIR         CSV log directory (default: /var/log/pigenny)
+  --log-interval SEC    Seconds between CSV log entries (default: 600 = 10 min)
+```
+
+**Note**: The defaults for `--inverter-port` and `--inverter-baud` are configured for the Waveshare RS-485 HAT with LuxPower inverter. If running manually, you typically don't need to specify these parameters unless your hardware differs.
+
+### Example Usage
+
+```bash
+# Test connections first
+python3 monitor.py --test-generator
+python3 monitor.py --test-inverter
+
+# Run with defaults (start at 25%, stop at 80%)
+python3 monitor.py
+
+# Custom thresholds and logging
+python3 monitor.py --soc-start 52 --soc-stop 57 --log-interval 300
+
+# Override serial port if needed (not typically required)
+python3 monitor.py --inverter-port /dev/ttyUSB0 --inverter-baud 9600
+```
+
+### CSV Data Logging
+
+The monitor logs inverter and generator data to daily CSV files.
+
+**Log Location**: `/var/log/pigenny/data_YYYYMMDD.csv`
+
+**Log Interval**: Default 10 minutes (configurable via `--log-interval`)
+
+**CSV Columns**:
+```
+timestamp, timestamp_unix, soc_pct, soh_pct, vbat_v, vpv1_v, vpv2_v,
+pv_power_w, charge_power_w, discharge_power_w, generator_state, generator_running
+```
+
+**Logging Behavior**:
+- New file created at midnight each day
+- File is opened, written, and closed on each log entry (crash-safe)
+- Header written only when creating a new file
+- Poll interval (30s default) is separate from log interval (10 min default)
+
+### Running in Background
+
+**Recommended**: Use `tmux` to run the monitor in a persistent session:
+
+```bash
+# Start a new tmux session
+tmux new -s pigenny
+
+# Run the monitor
+python3 monitor.py
+
+# Detach from session: Ctrl+B, then D
+# Reattach later: tmux attach -t pigenny
+```
+
+This keeps the monitor running even if your SSH session disconnects.
+
+### Control Thresholds
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| SOC Start | 25% | Start generator when SOC drops below |
+| SOC Stop | 80% | Stop generator when SOC rises above |
+| Poll Interval | 30s | Time between inverter reads |
+| Log Interval | 600s | Time between CSV log entries |
+| Generator Cooldown | 3600s | Min time between generator runs |
+| Generator Max Runtime | 7200s | Maximum generator run time |
+
+---
+
+## SD Card Update Process
+
+When you need to update the Olimex software:
+
+### Step 1: Remove SD Card
+
+1. Power off the Olimex
+2. Remove the microSD card
+3. Insert into Pi (or Mac/PC with SD reader)
+
+### Step 2: Mount the SD Card
+
+```bash
+# Find the device
+lsblk
+
+# Create mount point and mount (adjust device as needed)
+sudo mkdir -p /mnt/olimex
+sudo mount /dev/sda2 /mnt/olimex
+
+# Verify mount
+ls /mnt/olimex/usr/local/bin/
+```
+
+**Note**: The root partition is typically `/dev/sda2` (or `/dev/mmcblk0p2` on some systems).
+
+### Step 3: Run Install Script
+
+```bash
+cd ~/pigenny   # or wherever your pigenny directory is
+sudo ./install_server.sh /mnt/olimex
+```
+
+The script will:
+- Copy `gen_server.py` to `/usr/local/bin/`
+- Create startup wrapper script
+- Configure cron `@reboot` entry for auto-start
+- **Disable the firewall** for SSH access
+- Display configuration summary
+
+### Step 4: Unmount
+
+```bash
+sudo umount /mnt/olimex
+```
+
+### Step 5: Boot and Test
+
+1. Insert SD card back into Olimex
+2. Connect Ethernet from Pi to Olimex (direct wire)
+3. Set Pi's IP if not persistent:
+   ```bash
+   sudo ip addr add 10.2.242.1/24 dev eth0
+   ```
+4. Power on Olimex
+5. Wait ~30 seconds for boot
+6. Test:
+   ```bash
+   # Test SSH (should work after firewall disabled)
+   ssh root@10.2.242.109
+
+   # Test generator server
+   python3 gen_client.py --host 10.2.242.109
+   ```
+
+### Quick Test Commands
+
+In the gen_client interactive mode:
+```
+genny> ping
+PONG
+
+genny> status
+INPUTS: IN1=0 IN2=0 IN3=0 IN4=0 raw=0
+RELAYS: OFF (0x00)
+RUNNING: NO
+START_IN_PROGRESS: NO
+I2C: OK
+END
+
+genny> quit
+```
 
 ---
 
@@ -306,8 +458,8 @@ All relays OFF immediately:
 
 | Parameter | Value |
 |-----------|-------|
-| Port | /dev/ttySC1 (or /dev/ttyS0) |
-| Baud Rate | 19200 |
+| Port | /dev/ttyUSB0 or /dev/ttySC1 |
+| Baud Rate | 9600 (monitor.py) or 19200 (dump_ongoing.py) |
 | Parity | None |
 | Data Bits | 8 |
 | Stop Bits | 1 |
@@ -321,112 +473,38 @@ All relays OFF immediately:
 | 2 | PV2 Voltage | 0.1V | value / 10 |
 | 4 | Battery Voltage | 0.1V | value / 10 |
 | 5 | SOC/SOH Combined | % | SOC = value & 0xFF, SOH = value >> 8 |
-| 7 | PV1 Power | W | direct |
-| 8 | PV2 Power | W | direct |
 | 9 | Total PV Power | W | direct |
 | 10 | Battery Charge Power | W | direct |
 | 11 | Battery Discharge Power | W | direct |
-| 64 | Internal Temperature | °C | direct |
-| 101 | Max Cell Voltage | 0.001V | value / 1000 |
-| 102 | Min Cell Voltage | 0.001V | value / 1000 |
-| 103 | Max Cell Temperature | 0.1°C | value / 10 |
-| 104 | Min Cell Temperature | 0.1°C | value / 10 |
-
-### SOC/SOH Decoding
-
-Register 5 contains both values packed:
-```python
-def decode_soc_soh(register_5_value):
-    soc = register_5_value & 0xFF        # Low byte = State of Charge %
-    soh = register_5_value >> 8          # High byte = State of Health %
-    return soc, soh
-```
 
 ---
 
-## Control Logic
-
-### Thresholds
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| SOC_LOW | 25% | Start generator below this level |
-| SOC_HIGH | 80% | Stop generator above this level |
-| POLL_INTERVAL | 30s | Time between inverter reads |
-| GENERATOR_COOLDOWN | 3600s | Minimum time between generator runs |
-| GENERATOR_RUNTIME | 7200s | Maximum generator run time |
-
-### State Machine
-
-```
-                    ┌─────────────┐
-                    │   IDLE      │
-                    │ (Monitoring)│
-                    └──────┬──────┘
-                           │
-                    SOC < LOW?
-                           │
-              YES ─────────┴───────── NO
-               │                      │
-               ▼                      │
-        ┌─────────────┐               │
-        │  STARTING   │               │
-        │ (Crank seq) │               │
-        └──────┬──────┘               │
-               │                      │
-          Success?                    │
-               │                      │
-      YES ─────┴───── NO              │
-       │              │               │
-       ▼              ▼               │
-┌─────────────┐  ┌─────────┐         │
-│  RUNNING    │  │ FAILED  │         │
-│ (Charging)  │  │ (Retry?)│         │
-└──────┬──────┘  └─────────┘         │
-       │                              │
-  SOC >= HIGH?                        │
-       │                              │
-  YES ─┴─ NO                          │
-   │      │                           │
-   │      └───────────────────────────┤
-   │                                  │
-   ▼                                  │
-┌─────────────┐                       │
-│  STOPPING   │                       │
-│ (Shutdown)  │───────────────────────┘
-└─────────────┘
-```
-
----
-
-## Software Setup
-
-### OS Installation
-
-1. Flash "Raspberry Pi OS Lite (64-bit)" to SD card
-2. Enable SSH during imaging
-3. Set hostname: `pigenny`
-4. Configure network
+## Software Setup on Pi
 
 ### Package Installation
 
 ```bash
 # System packages
 sudo apt update && sudo apt upgrade -y
-sudo apt install -y python3 python3-pip python3-venv \
-    python3-gpiozero python3-serial git
+sudo apt install -y python3 python3-pip tmux
 
-# Python packages
-pip3 install pyserial RPi.GPIO gpiozero
+# Python packages (Raspberry Pi OS - use apt)
+sudo apt install -y python3-pymodbus python3-serial
 
-# Enable serial port for RS-485 HAT
-sudo raspi-config
-# Interface Options → Serial Port
-# Login shell over serial: NO
-# Serial hardware enabled: YES
+# Or in a virtual environment
+python3 -m venv ~/pigenny-venv
+source ~/pigenny-venv/bin/activate
+pip install pymodbus pyserial
 ```
 
-### RS-485 HAT Configuration
+### Create Log Directory
+
+```bash
+sudo mkdir -p /var/log/pigenny
+sudo chown $USER:$USER /var/log/pigenny
+```
+
+### RS-485 HAT Configuration (if using Waveshare HAT)
 
 For Waveshare HAT with SC16IS752 chip, add to `/boot/config.txt`:
 ```
@@ -440,93 +518,306 @@ ls /dev/ttySC*
 
 ---
 
-## File Structure
+## Automatic Startup (systemd Service)
 
+### Default Configuration
+
+The Pi is configured to automatically run `monitor.py` on boot with these parameters:
+- **Start generator**: SOC < 40%
+- **Stop generator**: SOC >= 80%
+- **Log interval**: 10 minutes
+- **Serial port**: `/dev/ttySC1` (Waveshare RS-485 HAT)
+- **Baud rate**: 19200
+
+### Initial Setup
+
+**Status**: ✓ This service is already configured and running on the Pi (setup completed Jan 1, 2026).
+
+To set up the service from scratch on a new system, follow these steps:
+
+**1. Create the log directory:**
+```bash
+sudo mkdir -p /var/log/pigenny
+sudo chown $USER:$USER /var/log/pigenny
 ```
-pigenny/
-├── documentation.md        # This file
-├── generator_control.py    # GPIO relay control module
-├── inverter_monitor.py     # RS-485 inverter communication
-├── main.py                 # Main daemon combining both
-├── config.yaml             # Configuration file
-└── tests/
-    ├── test_relays.py      # Relay board test
-    └── test_inverter.py    # RS-485 communication test
+
+**2. Create the systemd service file:**
+```bash
+sudo nano /etc/systemd/system/pigenny.service
 ```
 
----
-
-## systemd Service
-
-Create `/etc/systemd/system/pigenny.service`:
+**3. Paste this content:**
 
 ```ini
 [Unit]
-Description=PiGenny Generator Controller
+Description=PiGenny Generator Monitor
 After=network.target
+Wants=network.target
 
 [Service]
 Type=simple
-User=pi
-WorkingDirectory=/home/pi/pigenny
-ExecStart=/usr/bin/python3 /home/pi/pigenny/main.py
+User=derekja
+WorkingDirectory=/home/derekja/pigenny
+ExecStart=/usr/bin/python3 /home/derekja/pigenny/monitor.py --inverter-port /dev/ttySC1 --inverter-baud 19200 --soc-start 40 --soc-stop 80 --log-interval 600
 Restart=always
-RestartSec=10
-ExecStop=/usr/bin/python3 /home/pi/pigenny/generator_control.py stop
-TimeoutStopSec=30
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-Enable and start:
+**Note**: Change `User` and `WorkingDirectory` to match your username and pigenny location if different.
+
+**4. Enable and start the service:**
 ```bash
 sudo systemctl daemon-reload
 sudo systemctl enable pigenny
 sudo systemctl start pigenny
 ```
 
+**5. Verify it's running:**
+```bash
+sudo systemctl status pigenny
+```
+
+You should see output showing:
+```
+Active: active (running)
+INFO | Connected to inverter on /dev/ttySC1
+INFO | Connecting to generator server...
+```
+
+### Managing the Service
+
+**View live logs:**
+```bash
+journalctl -u pigenny -f
+```
+
+**Check status:**
+```bash
+sudo systemctl status pigenny
+```
+
+**Stop the service:**
+```bash
+sudo systemctl stop pigenny
+```
+
+**Start the service:**
+```bash
+sudo systemctl start pigenny
+```
+
+**Restart the service:**
+```bash
+sudo systemctl restart pigenny
+```
+
+**Disable auto-start on boot (but keep running now):**
+```bash
+sudo systemctl disable pigenny
+```
+
+**Enable auto-start on boot:**
+```bash
+sudo systemctl enable pigenny
+```
+
+### Running Manually with Custom Parameters
+
+If you want to stop the automatic service and run monitor.py manually with different parameters:
+
+**1. Stop the automatic service:**
+```bash
+sudo systemctl stop pigenny
+```
+
+**2. Start a tmux session:**
+```bash
+tmux new -s pigenny
+```
+
+**3. Run monitor.py with your custom parameters:**
+```bash
+# Example: Start at 30%, stop at 90%, log every 5 minutes
+python3 monitor.py --soc-start 30 --soc-stop 90 --log-interval 300
+
+# The serial port and baud rate use correct defaults, no need to specify them
+```
+
+**4. Detach from tmux (to leave it running in background):**
+```
+Press: Ctrl+B, then D
+```
+
+**5. Reattach to the tmux session later:**
+```bash
+tmux attach -t pigenny
+```
+
+**Important Notes:**
+- The manual process will continue running until you stop it or reboot
+- On Pi reboot, the systemd service will automatically start again with the default parameters (40%/80%)
+- If you want to permanently change the default parameters, see "Changing Default Parameters" below
+
+### Changing Default Parameters
+
+To permanently change the default SOC thresholds or other parameters:
+
+**1. Edit the service file:**
+```bash
+sudo nano /etc/systemd/system/pigenny.service
+```
+
+**2. Modify the `ExecStart` line parameters:**
+```ini
+# Example: Change to start at 35%, stop at 85%, log every 5 minutes
+ExecStart=/usr/bin/python3 /home/derekja/pigenny/monitor.py --inverter-port /dev/ttySC1 --inverter-baud 19200 --soc-start 35 --soc-stop 85 --log-interval 300
+```
+
+**3. Reload and restart:**
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart pigenny
+```
+
+**4. Verify new parameters:**
+```bash
+journalctl -u pigenny -n 20 --no-pager
+```
+
+Look for the line showing your new thresholds:
+```
+INFO | SOC thresholds: start < 35%, stop >= 85%
+```
+
+### Checking What's Running
+
+To see if monitor.py is running and how:
+
+```bash
+# Check if systemd service is running
+sudo systemctl status pigenny
+
+# Check for any monitor.py processes
+ps aux | grep monitor.py
+
+# See the command line arguments being used
+ps aux | grep -v grep | grep monitor.py
+```
+
+**Warning**: Don't run both the systemd service AND a manual monitor.py at the same time - they will conflict trying to control the same generator.
+
+---
+
+## Troubleshooting
+
+### Can't connect to Olimex
+
+1. Check IP address is set on Pi: `ip addr show eth0`
+2. Ping the Olimex: `ping 10.2.242.109`
+3. Check if server is running: `nc -zv 10.2.242.109 9999`
+4. SSH to Olimex and check logs: `cat /var/log/gen_server.log`
+
+### SSH connection refused
+
+Run the install script again to disable the firewall, then reboot the Olimex.
+
+### Generator won't start
+
+1. Check STATUS - verify I2C is "OK" not "SIMULATED"
+2. Check INPUTS - verify input sensing is working
+3. Try manual relay control: `RELAY 08` (IGN only)
+4. Check physical connections
+
+### Inverter communication errors
+
+1. Verify serial port: `ls /dev/ttyUSB* /dev/ttySC*`
+2. Check baud rate matches inverter settings
+3. Test with: `python3 monitor.py --test-inverter`
+
+### CSV logs not appearing
+
+1. Check log directory exists: `ls -la /var/log/pigenny/`
+2. Check permissions: directory should be writable
+3. Verify log interval isn't too long
+
 ---
 
 ## Safety Considerations
 
-### Power Failure
-
-- Implement UPS or graceful shutdown on power loss
-- Consider read-only root filesystem for SD card reliability
-
 ### Generator Protection
 
 - Maximum crank time: 12 seconds (prevents starter damage)
+- Glow plugs: 2 seconds max (prevents element damage)
+- 3-minute cooldown on stop (protects turbo/bearings)
 - Cooldown period between start attempts
-- Automatic shutdown on failure
 
 ### Charger Protection
 
-- 10-second timer relay delay for AC stabilization
-- Software delay as additional safety margin
-- Future: AC confirmation via Supco relay before enabling charger
+- 60-second warmup after generator starts
+- 20-second AC stabilization delay before charger enable
+- External 10-second timer relay for additional protection
+
+### Power Failure
+
+- CSV logging with open/write/close pattern survives crashes
+- Consider UPS for Pi if frequent power outages
+- Olimex has very low power consumption
 
 ---
 
-## Future Enhancements
+## Quick Reference
 
-1. **AC Confirmation Input**
-   - Supco relay providing GPIO input when 240VAC present
-   - Positive confirmation before enabling charger
-   - Generator failure detection during operation
+### IP Addresses
+- Olimex: `10.2.242.109`
+- Pi: `10.2.242.1`
 
-2. **Web Interface**
-   - Real-time status display
-   - Manual control overrides
-   - Historical data graphs
+### Ports
+- Generator server: TCP `9999`
 
-3. **Notifications**
-   - Email/SMS alerts on generator start/stop
-   - Low battery warnings
-   - Failure notifications
+### Default Settings
+- SOC Start: 40%
+- SOC Stop: 80%
+- Log Interval: 10 minutes (600s)
+- Serial Port: `/dev/ttySC1`
+- Baud Rate: 19200
 
-4. **Data Logging**
-   - CSV logging of inverter data
-   - Generator run history
-   - Battery cycle tracking
+### Key Commands
+```bash
+# Set Pi IP (temporary)
+sudo ip addr add 10.2.242.1/24 dev eth0
+
+# Test generator connection
+python3 gen_client.py --host 10.2.242.109
+
+# Check monitor service status
+sudo systemctl status pigenny
+journalctl -u pigenny -f
+
+# Stop automatic monitor and run manually with custom thresholds
+sudo systemctl stop pigenny
+tmux new -s pigenny
+python3 monitor.py --soc-start 52 --soc-stop 57
+# Ctrl+B, D to detach
+
+# Restart automatic monitor with defaults (40%/80%)
+sudo systemctl start pigenny
+
+# Update Olimex SD card
+sudo mount /dev/sda2 /mnt/olimex
+sudo ./install_server.sh /mnt/olimex
+sudo umount /mnt/olimex
+```
+
+### Generator Commands
+```
+PING     - Test connection
+STATUS   - Full status report
+START    - Start generator (blocking ~2 min)
+STOP     - Stop with 3 min cooldown
+RELAY xx - Direct relay control (hex)
+```

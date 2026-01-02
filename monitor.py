@@ -50,8 +50,8 @@ from gen_client import GeneratorClient
 
 CONFIG = {
     # Inverter RS-485 settings
-    'inverter_port': '/dev/ttyUSB0',  # Or /dev/ttySC0, /dev/ttySC1
-    'inverter_baud': 9600,
+    'inverter_port': '/dev/ttySC1',   # Waveshare RS-485 HAT
+    'inverter_baud': 19200,           # LuxPower inverter baud rate
     'inverter_slave_id': 1,
 
     # Generator server settings
