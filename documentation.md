@@ -129,6 +129,7 @@ pigenny/
 ├── monitor.py              # Main monitoring daemon with auto-start logic
 ├── update_genserver.py     # Automated deployment tool for Olimex (Python 2)
 ├── genserverstatus.py      # Status query tool (Python 2/3 compatible)
+├── deploy.sh               # Automated deployment to both Pi and Olimex
 ├── install_server.sh       # Script to install server to Olimex SD card
 └── luxpower_485/           # Inverter communication tools
     └── dump_ongoing.py     # Standalone inverter data logger
@@ -875,6 +876,108 @@ journalctl -u pigenny | grep "Olimex health"
 - Memory >80%: Memory leak or excessive logging
 - Disk <100MB free: Log rotation needed
 - Uptime resets unexpectedly: Investigate cause of reboot
+
+---
+
+## Deployment
+
+### Automated Deployment (Recommended)
+
+The `deploy.sh` script automates the entire deployment process to both Pi and Olimex, handling all file copying, service restarts, verification, and retries.
+
+**Prerequisites:**
+- SSH key authentication to Pi configured (`~/.ssh/momspi`)
+- `sshpass` installed on Pi (for Olimex access)
+- Run from the `pigenny/` directory
+
+**Basic Usage:**
+```bash
+# Deploy to both Pi and Olimex (full deployment)
+cd pigenny
+./deploy.sh
+```
+
+**Options:**
+```bash
+# Deploy only to Pi (skip Olimex)
+./deploy.sh --skip-olimex
+
+# Deploy only to Olimex (skip Pi)
+./deploy.sh --skip-pi
+
+# Force deployment even if generator is running (DANGEROUS!)
+./deploy.sh --force
+```
+
+**What it does:**
+1. **Safety Check**: Verifies generator is stopped before deploying to Olimex
+2. **Pi Deployment**:
+   - Copies `monitor.py` and `genserverstatus.py` to Pi
+   - Restarts pigenny service
+   - Verifies service started successfully
+3. **Olimex Deployment**:
+   - Copies files through Pi to Olimex
+   - Installs maintenance tools (`update_genserver.py`, `genserverstatus.py`)
+   - Deploys `gen_server.py` using `update_genserver.py`
+   - Reboots if needed and waits for system to come back online
+4. **Verification**:
+   - Checks gen_server.py process is running
+   - Queries status to confirm server is responding
+   - Displays system health metrics
+
+**Example output:**
+```
+[INFO] ==========================================
+[INFO]   PiGenny Deployment Script
+[INFO] ==========================================
+
+[SUCCESS] Generator is stopped, safe to deploy
+
+[INFO] ==========================================
+[INFO]   Deploying to Raspberry Pi
+[INFO] ==========================================
+[INFO] Copying monitor.py to Pi...
+[INFO] Copying genserverstatus.py to Pi...
+[INFO] Setting permissions and restarting service...
+[INFO] Waiting for service to start...
+[INFO] Verifying service status...
+[SUCCESS] Pi deployment complete - service is active
+
+[INFO] ==========================================
+[INFO]   Deploying to Olimex
+[INFO] ==========================================
+[INFO] Copying files to Pi staging area...
+[INFO] Copying files to Olimex...
+[INFO] Installing maintenance tools on Olimex...
+[SUCCESS] Maintenance tools installed
+[INFO] Deploying gen_server.py using update script...
+[SUCCESS] gen_server.py deployed successfully
+
+[INFO] Verifying Olimex deployment...
+[SUCCESS] gen_server.py process is running
+[INFO] Querying status...
+[SUCCESS] Status query successful:
+    [10.2.242.109:9999] RUN=NO RELAY=OFF THR=1 UP=0h2m MEM=46%
+
+[SUCCESS] ==========================================
+[SUCCESS]   Deployment Complete!
+[SUCCESS] ==========================================
+
+[INFO] Pi Status:
+    Service: active
+[INFO] Olimex Status:
+    [10.2.242.109:9999] RUN=NO RELAY=OFF THR=1 UP=0h2m MEM=46%
+```
+
+**Error Handling:**
+- Automatically reboots Olimex if update script reports issues
+- Waits for Olimex to come back online and verifies gen_server started
+- Fails fast with clear error messages if deployment cannot proceed
+- Will not deploy to Olimex if generator is running (unless `--force` used)
+
+### Manual Deployment (Advanced)
+
+For manual control over the deployment process, see the individual tool documentation above for `update_genserver.py` and the step-by-step commands.
 
 ---
 

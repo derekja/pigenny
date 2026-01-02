@@ -287,13 +287,40 @@ ssh -i ~/.ssh/momspi derekja@momspi.local "tail -20 /var/log/pigenny/data_$(date
 
 ## Deployment Process
 
-### Deploying to Pi
+### Automated Deployment (Recommended)
+
+Use `deploy.sh` for fully automated deployment to both Pi and Olimex:
+
+```bash
+cd pigenny
+./deploy.sh
+```
+
+**Options:**
+- `--skip-pi` - Skip Pi deployment
+- `--skip-olimex` - Skip Olimex deployment
+- `--force` - Deploy even if generator is running (DANGEROUS!)
+
+**What it does:**
+1. Checks generator is stopped (safety check)
+2. Deploys monitor.py and genserverstatus.py to Pi
+3. Restarts pigenny service on Pi
+4. Deploys gen_server.py and tools to Olimex
+5. Uses update_genserver.py to restart gen_server
+6. Reboots Olimex if needed
+7. Verifies both systems are operational
+
+**The script handles all SSH, file copying, service restarts, and verification automatically.**
+
+### Manual Deployment (if needed)
+
+#### Deploying to Pi
 ```bash
 scp -i ~/.ssh/momspi pigenny/monitor.py derekja@momspi.local:/home/derekja/pigenny/
 ssh -i ~/.ssh/momspi derekja@momspi.local "sudo systemctl restart pigenny"
 ```
 
-### Deploying to Olimex
+#### Deploying to Olimex
 **WARNING:** Restarting gen_server.py immediately shuts down generator!
 
 **Only deploy when:**
