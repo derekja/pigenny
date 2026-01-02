@@ -123,13 +123,32 @@ The `derekja` user is a member of the `wheel` group and can run sudo commands.
 ```
 pigenny/
 ├── documentation.md        # This file
+├── CLAUDE.md               # AI assistant context documentation
 ├── gen_server.py           # TCP server for Olimex (Python 2/3 compatible)
 ├── gen_client.py           # TCP client for Pi (Python 3)
 ├── monitor.py              # Main monitoring daemon with auto-start logic
+├── update_genserver.py     # Automated deployment tool for Olimex (Python 2)
+├── genserverstatus.py      # Status query tool (Python 2/3 compatible)
 ├── install_server.sh       # Script to install server to Olimex SD card
 └── luxpower_485/           # Inverter communication tools
     └── dump_ongoing.py     # Standalone inverter data logger
 ```
+
+### Installed Locations
+
+**On Raspberry Pi:**
+- `/home/derekja/pigenny/monitor.py` - Main control daemon
+- `/home/derekja/pigenny/genserverstatus.py` - Status query tool
+- `/etc/systemd/system/pigenny.service` - Systemd service file
+- `/var/log/pigenny/data_YYYYMMDD.csv` - Daily CSV logs
+
+**On Olimex:**
+- `/usr/local/bin/gen_server.py` - Generator control server
+- `/usr/local/bin/update_genserver.py` - Update automation tool
+- `/usr/local/bin/genserverstatus.py` - Status query tool
+- `/usr/local/bin/start_gen_server.sh` - Auto-start wrapper script
+- `/etc/rc.local` - Calls start_gen_server.sh at boot
+- `/var/log/gen_server.log` - Server log file
 
 ---
 
@@ -363,7 +382,7 @@ This keeps the monitor running even if your SSH session disconnects.
 | Poll Interval | 30s | Time between inverter reads |
 | Log Interval | 600s | Time between CSV log entries |
 | Generator Cooldown | 3600s | Min time between generator runs |
-| Generator Max Runtime | 7200s | Maximum generator run time |
+| Generator Max Runtime | 14400s (4 hours) | Maximum generator run time |
 
 ---
 
@@ -525,6 +544,7 @@ ls /dev/ttySC*
 The Pi is configured to automatically run `monitor.py` on boot with these parameters:
 - **Start generator**: SOC < 40%
 - **Stop generator**: SOC >= 80%
+- **Max runtime**: 4 hours (14400 seconds)
 - **Log interval**: 10 minutes
 - **Serial port**: `/dev/ttySC1` (Waveshare RS-485 HAT)
 - **Baud rate**: 19200
@@ -710,6 +730,151 @@ ps aux | grep -v grep | grep monitor.py
 ```
 
 **Warning**: Don't run both the systemd service AND a manual monitor.py at the same time - they will conflict trying to control the same generator.
+
+---
+
+## Maintenance Tools
+
+### update_genserver.py - Automated Olimex Updates
+
+This Python 2 script automates deployment of gen_server.py updates to the Olimex, eliminating manual SSH, copying, and restart steps.
+
+**Location**: `/usr/local/bin/update_genserver.py` on Olimex
+
+**Usage**:
+```bash
+# On Olimex (requires sudo/root)
+sudo python2 /usr/local/bin/update_genserver.py [--source /path/to/gen_server.py]
+```
+
+**Default source**: `/home/derekja/gen_server.py`
+
+**What it does**:
+1. Verifies source file exists and checks size
+2. Finds currently running gen_server.py process (if any)
+3. Copies file to `/usr/local/bin/gen_server.py` with correct permissions (755)
+4. Kills old process gracefully (SIGTERM, then SIGKILL if needed)
+5. Waits for rc.local to auto-restart the server (up to 30 seconds)
+6. Verifies new process started and is responding on port 9999
+
+**Options**:
+- `--source PATH` - Specify alternate source file path
+- `--no-verify` - Skip verification checks (not recommended)
+
+**Remote deployment from your computer**:
+```bash
+# From local machine through Pi to Olimex
+scp -i ~/.ssh/momspi pigenny/gen_server.py derekja@momspi.local:/tmp/
+ssh -i ~/.ssh/momspi derekja@momspi.local \
+  "sshpass -p 'Login123' scp /tmp/gen_server.py derekja@10.2.242.109:/home/derekja/ && \
+   sshpass -p 'Login123' ssh derekja@10.2.242.109 'echo Login123 | sudo -S python2 /usr/local/bin/update_genserver.py'"
+```
+
+**Warning**: This will immediately shut down the generator if it's running! Only deploy when:
+- Generator is not running
+- Generator has completed a proper stop sequence with cooldown
+- You're willing to accept immediate generator shutdown
+
+### genserverstatus.py - Health & Status Monitoring
+
+Query generator status and Olimex system health metrics.
+
+**Locations**:
+- Olimex: `/usr/local/bin/genserverstatus.py` (local queries)
+- Pi: `/home/derekja/pigenny/genserverstatus.py` (remote queries)
+
+**Usage**:
+```bash
+# On Olimex (local query)
+python2 /usr/local/bin/genserverstatus.py
+
+# From Pi (remote query)
+python2 /home/derekja/pigenny/genserverstatus.py --host 10.2.242.109
+
+# Compact single-line format
+python2 genserverstatus.py --format compact
+
+# Key=value format for scripting
+python2 genserverstatus.py --format kv
+```
+
+**Output includes**:
+- **Generator State**: Running status, relay states (IGN, START, GLOW, CHARGER), input states
+- **System Health**: Active threads, uptime, memory usage %, disk space available
+- **I2C Status**: Whether MOD-IO board communication is working
+
+**Output Formats**:
+
+**human** (default) - Multi-line readable format:
+```
+============================================================
+Generator Server Status - 10.2.242.109:9999
+============================================================
+
+GENERATOR:
+  Running:        YES
+  Start Progress: NO
+  Relays:         IGN+CHARGER (0x0A)
+  Inputs:         IN1=1 IN2=1 IN3=0 IN4=0 raw=3
+
+SYSTEM HEALTH:
+  Active Threads: 2
+  Uptime:         6h45m
+  Memory Used:    42%
+  Disk Usage:     1.2G free (35% used)
+  I2C Status:     OK
+```
+
+**compact** - Single line for dashboards:
+```
+[10.2.242.109:9999] RUN=YES RELAY=IGN+CHARGER THR=2 UP=6h45m MEM=42%
+```
+
+**kv** - Key=value pairs for parsing/scripting:
+```
+host=10.2.242.109
+port=9999
+running=YES
+relays=IGN+CHARGER (0x0A)
+threads=2
+uptime=6h45m
+memory=42%
+disk=1.2G free (35% used)
+i2c=OK
+```
+
+### Automated Olimex Health Monitoring
+
+The Pi's monitor.py automatically monitors Olimex system health and logs metrics to the Pi's system logs.
+
+**Health check interval**: 1 hour (3600 seconds, configurable)
+
+**Metrics monitored**:
+- **Active threads** - Detects thread leaks (normal: 0-3 threads)
+- **Uptime** - Detects unexpected reboots
+- **Memory usage** - Detects memory leaks (normal: <60%)
+- **Disk space** - Prevents log file exhaustion (warn if <500MB free)
+
+**View health logs**:
+```bash
+# On Pi - view recent health checks
+journalctl -u pigenny | grep "Olimex health"
+
+# Example output:
+# 2026-01-02 15:30:00 | INFO | Olimex health: threads=2 uptime=6h45m memory=42% disk=1.2G free (35% used)
+```
+
+**Normal values**:
+- Threads: 0-3 (0 = idle, 1-3 = active connections)
+- Memory: 30-60% (Olimex has 64MB RAM)
+- Disk: Should have >500MB free
+- Uptime: Should match expected runtime
+
+**Warning signs**:
+- Threads >10: Possible thread leak, check for "can't start new thread" errors
+- Memory >80%: Memory leak or excessive logging
+- Disk <100MB free: Log rotation needed
+- Uptime resets unexpectedly: Investigate cause of reboot
 
 ---
 

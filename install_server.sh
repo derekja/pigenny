@@ -38,6 +38,14 @@ echo "Copying gen_server.py..."
 cp "$SCRIPT_DIR/gen_server.py" "$SDCARD/usr/local/bin/"
 chmod 755 "$SDCARD/usr/local/bin/gen_server.py"
 
+# Copy maintenance tools
+echo "Copying maintenance tools..."
+cp "$SCRIPT_DIR/update_genserver.py" "$SDCARD/usr/local/bin/"
+chmod 755 "$SDCARD/usr/local/bin/update_genserver.py"
+
+cp "$SCRIPT_DIR/genserverstatus.py" "$SDCARD/usr/local/bin/"
+chmod 755 "$SDCARD/usr/local/bin/genserverstatus.py"
+
 # Create startup wrapper
 echo "Creating startup wrapper..."
 cat > "$SDCARD/usr/local/bin/start_gen_server.sh" << 'EOF'
@@ -197,6 +205,8 @@ echo ""
 echo "Files installed:"
 echo "  $SDCARD/usr/local/bin/gen_server.py"
 echo "  $SDCARD/usr/local/bin/start_gen_server.sh"
+echo "  $SDCARD/usr/local/bin/update_genserver.py"
+echo "  $SDCARD/usr/local/bin/genserverstatus.py"
 echo ""
 echo "The server will start automatically on boot."
 echo "It listens on port 9999 for TCP connections."

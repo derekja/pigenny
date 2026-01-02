@@ -48,12 +48,17 @@ REG_INPUT = 0x20
 # Server configuration
 DEFAULT_HOST = '0.0.0.0'
 DEFAULT_PORT = 9999
+MAX_CONCURRENT_CONNECTIONS = 5
 
 # Generator state
 generator_lock = threading.Lock()
 current_relay_state = 0
 generator_running = False
 start_in_progress = False
+
+# Thread tracking for cleanup
+active_threads = []
+threads_lock = threading.Lock()
 
 
 def log(message):
@@ -112,16 +117,74 @@ def format_relays(relay_byte):
     return "+".join(names)
 
 
+def get_system_metrics():
+    """Get system health metrics"""
+    import os
+    import subprocess
+
+    metrics = {}
+
+    # Thread count
+    with threads_lock:
+        metrics['threads_active'] = len(active_threads)
+
+    # Uptime
+    try:
+        with open('/proc/uptime', 'r') as f:
+            uptime_seconds = int(float(f.read().split()[0]))
+            hours = uptime_seconds // 3600
+            minutes = (uptime_seconds % 3600) // 60
+            metrics['uptime'] = "%dh%dm" % (hours, minutes)
+    except:
+        metrics['uptime'] = "unknown"
+
+    # Memory usage
+    try:
+        with open('/proc/meminfo', 'r') as f:
+            lines = f.readlines()
+            mem_total = mem_free = 0
+            for line in lines:
+                if line.startswith('MemTotal:'):
+                    mem_total = int(line.split()[1])
+                elif line.startswith('MemAvailable:') or line.startswith('MemFree:'):
+                    mem_free = int(line.split()[1])
+            if mem_total > 0:
+                mem_used_pct = int(100.0 * (mem_total - mem_free) / mem_total)
+                metrics['memory'] = "%d%%" % mem_used_pct
+            else:
+                metrics['memory'] = "unknown"
+    except:
+        metrics['memory'] = "unknown"
+
+    # Disk space
+    try:
+        st = os.statvfs('/')
+        total_gb = (st.f_blocks * st.f_frsize) / (1024.0 ** 3)
+        free_gb = (st.f_bfree * st.f_frsize) / (1024.0 ** 3)
+        used_pct = int(100.0 * (total_gb - free_gb) / total_gb)
+        metrics['disk'] = "%.1fG free (%d%% used)" % (free_gb, used_pct)
+    except:
+        metrics['disk'] = "unknown"
+
+    return metrics
+
+
 def get_status():
     """Get full status report"""
     inputs = read_inputs()
     running = (inputs == 3)
+    metrics = get_system_metrics()
+
     lines = [
         "INPUTS: %s" % format_inputs(inputs),
         "RELAYS: %s (0x%02X)" % (format_relays(current_relay_state), current_relay_state),
         "RUNNING: %s" % ("YES" if running else "NO"),
         "START_IN_PROGRESS: %s" % ("YES" if start_in_progress else "NO"),
         "I2C: %s" % ("OK" if I2C_AVAILABLE else "SIMULATED"),
+        "THREADS: %s" % metrics.get('threads_active', 'unknown'),
+        "UPTIME: %s" % metrics.get('uptime', 'unknown'),
+        "MEMORY: %s" % metrics.get('memory', 'unknown'),
+        "DISK: %s" % metrics.get('disk', 'unknown'),
         "END"
     ]
     return "\n".join(lines)
@@ -277,6 +340,17 @@ END"""
         return "ERROR: Unknown command '%s' (try HELP)" % command
 
 
+def cleanup_finished_threads():
+    """Remove finished threads from active_threads list"""
+    global active_threads
+    with threads_lock:
+        before = len(active_threads)
+        active_threads = [t for t in active_threads if t.is_alive()]
+        after = len(active_threads)
+        if before > after:
+            log("Thread cleanup: %d finished, %d active" % (before - after, after))
+
+
 def handle_client(client_socket, address):
     """Handle a single client connection"""
     log("Client connected: %s:%d" % address)
@@ -338,13 +412,31 @@ def run_server(host, port):
         set_relays(0b0000)
 
         while True:
+            # Clean up finished threads before accepting new connection
+            cleanup_finished_threads()
+
+            # Check if we're at connection limit
+            with threads_lock:
+                active_count = len(active_threads)
+
+            if active_count >= MAX_CONCURRENT_CONNECTIONS:
+                log("Warning: At max concurrent connections (%d), waiting..." % MAX_CONCURRENT_CONNECTIONS)
+                time.sleep(1)
+                continue
+
             client_socket, address = server_socket.accept()
+
             # Handle each client in a thread
             client_thread = threading.Thread(
                 target=handle_client,
                 args=(client_socket, address)
             )
             client_thread.daemon = True
+
+            # Track the thread
+            with threads_lock:
+                active_threads.append(client_thread)
+
             client_thread.start()
 
     except KeyboardInterrupt:

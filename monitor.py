@@ -65,7 +65,7 @@ CONFIG = {
     # Timing
     'poll_interval': 30,          # Seconds between inverter reads
     'generator_cooldown': 3600,   # Minimum seconds between generator runs
-    'generator_max_runtime': 7200, # Maximum seconds for generator to run
+    'generator_max_runtime': 14400, # Maximum seconds for generator to run (4 hours)
 
     # Safety
     'max_start_attempts': 3,      # Max consecutive start failures before giving up
@@ -74,6 +74,7 @@ CONFIG = {
     'csv_log_dir': '/var/log/pigenny',
     'csv_log_prefix': 'data_',
     'log_interval': 600,          # Seconds between CSV log entries (default 10 min)
+    'olimex_health_check_interval': 3600,  # Seconds between Olimex health checks (default 1 hour)
 }
 
 
@@ -303,6 +304,10 @@ class PiGennyMonitor:
         self.log_interval = config['log_interval']
         self.last_log_time = None
 
+        # Olimex health monitoring
+        self.olimex_health_check_interval = config['olimex_health_check_interval']
+        self.last_health_check_time = None
+
         # Timing
         self.generator_started_at = None
         self.generator_stopped_at = None
@@ -413,6 +418,33 @@ class PiGennyMonitor:
         elapsed = (datetime.now() - self.generator_started_at).total_seconds()
         return elapsed >= self.config['generator_max_runtime']
 
+    def check_olimex_health(self):
+        """Check Olimex system health and log metrics"""
+        try:
+            status_text = self.generator.get_status()
+            if not status_text:
+                log.warning("Failed to get Olimex health status")
+                return
+
+            # Parse status response
+            metrics = {}
+            for line in status_text.split('\n'):
+                line = line.strip()
+                if ':' in line and line != 'END':
+                    key, value = line.split(':', 1)
+                    metrics[key.strip()] = value.strip()
+
+            # Extract key health metrics
+            threads = metrics.get('THREADS', 'unknown')
+            uptime = metrics.get('UPTIME', 'unknown')
+            memory = metrics.get('MEMORY', 'unknown')
+            disk = metrics.get('DISK', 'unknown')
+
+            log.info(f"Olimex health: threads={threads} uptime={uptime} memory={memory} disk={disk}")
+
+        except Exception as e:
+            log.warning(f"Failed to check Olimex health: {e}")
+
     def run_once(self):
         """Run one monitoring cycle"""
         # Read inverter
@@ -439,6 +471,19 @@ class PiGennyMonitor:
                 self.csv_logger.log_data(data, self.state, generator_running)
                 self.last_log_time = now
                 log.info(f"CSV logged (next in {self.log_interval}s)")
+
+            # Check Olimex health at specified interval
+            should_health_check = False
+            if self.last_health_check_time is None:
+                should_health_check = True  # First check
+            else:
+                health_elapsed = (now - self.last_health_check_time).total_seconds()
+                if health_elapsed >= self.olimex_health_check_interval:
+                    should_health_check = True
+
+            if should_health_check:
+                self.check_olimex_health()
+                self.last_health_check_time = now
         else:
             log.warning("Failed to read inverter data")
             return
