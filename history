@@ -1,0 +1,485 @@
+    1  pushd ~/.ssh
+    2  cd .ssh
+    3  ls
+    4  ls -la
+    5  cat authorized_keys 
+    6  cd ..
+    7  sudo vim /etc/ssh/sshd_config
+    8  sudo apt install vim
+    9  sudo vim /etc/ssh/sshd_config
+   10  sudo systemctl restart ssh
+   11  sudo raspi-config
+   12  ls -la
+   13  lsblk
+   14  sudo umount /dev/sda2
+   15  lsblk
+   16  sudo dd if=/dev/sda of=sdcard.img bs=4M status=progress conv=sync,noerror
+   17  lsblk
+   18  ls -la
+   19  df -h
+   20  sudo rm sdcard.img
+   21  df -h
+   22  pushd /media/derekja
+   23  ls
+   24  cd 86BC-55C6/
+   25  ls
+   26  sudo dd if=/dev/sda of=./sdcard.img bs=4M status=progress conv=sync,noerror
+   27  sudorm sdcard.img
+   28  sudo rm sdcard.img
+   29  sudo dd if=/dev/sda bs=4M status=progress | gzip -1 > ./sdcard.img.gz
+   30  df -h
+   31  sudo apt update
+   32  sudo apt install -y python3-pip
+   33  pip3 install pyserial
+   34  ls -l /dev/serial0 /dev/ttyAMA0 /dev/ttySC*
+   35  sudo apt update
+   36  sudo apt install -y python3-serial
+   37  ls -l /dev/tty*
+   38  ls -l /dev/spidev*
+   39  sudo raspi-config
+   40  sudo reboot
+   41  ls -l /dev/spidev*
+   42  sudo nano /boot/firmware/config.txt
+   43  sudo reboot
+   44  ls -l /dev/ttySC*
+   45  dmesg | grep -i sc16
+   46  nano sniffer.py
+   47  chmod +x sniffer.py
+   48  ./sniffer.py --port /dev/ttySC1 --baud 9600 --gap-ms 20 --also-stdout
+   49  echo $XDG_SESSION_TYPE
+   50  sudo systemctl set-default multi-user.target
+   51  sudo reboot
+   52  sudo systemctl set-default graphical.target
+   53  sudo reboot
+   54  sudo nano /boot/firmware/config.txt
+   55  sudo reboot
+   56  ls -l /dev/ttySC*
+   57  ./sniffer.py --port /dev/ttySC1 --baud 9600 --gap-ms 20 --also-stdout
+   58  ./sniffer.py --port /dev/ttySC1 --baud 19200 --gap-ms 20 --also-stdout
+   59  /dev/ttySC0
+   60  /dev/ttySC1
+   61  ls -l /dev/ttySC*
+   62  sudo usermod -a -G dialout derekja
+   63  exit
+   64  groups
+   65  ./sniffer.py --port /dev/ttySC1 --baud 9600 --gap-ms 20 --also-stdout
+   66  ./sniffer.py --port /dev/ttySC1 --baud 19200 --gap-ms 20 --also-stdout
+   67  ./sniffer.py --port /dev/ttySC0 --baud 9600 --gap-ms 20 --also-stdout
+   68  ./sniffer.py --port /dev/ttySC0 --baud 19200 --gap-ms 20 --also-stdout
+   69  ./sniffer.py --port /dev/ttySC0 --baud 9600 --gap-ms 20 --also-stdout
+   70  ./sniffer.py --port /dev/ttySC0 --baud 19200 --gap-ms 20 --also-stdout
+   71  ./sniffer.py --port /dev/ttySC1 --baud 9600 --gap-ms 20 --also-stdout
+   72  ./sniffer.py --port /dev/ttySC1 --baud 19200 --gap-ms 20 --also-stdout
+   73  sudo nano /boot/firmware/config.txt
+   74  sudo reboot
+   75  ls -l /dev/ttySC*
+   76  ./sniffer.py --port /dev/ttySC1 --baud 19200 --gap-ms 20 --also-stdout
+   77  ./sniffer.py --port /dev/ttySC0 --baud 19200 --gap-ms 20 --also-stdout
+   78  ./sniffer.py --port /dev/ttySC0 --baud 19200 --gap-ms 5 --also-stdout --log eg4_gap.log
+   79  python3 - <<'PY'
+   80  import serial, time
+   81  ser = serial.Serial("/dev/ttySC0", 19200, timeout=0.1)
+   82  fn = f"eg4_raw_{int(time.time())}.bin"
+   83  with open(fn, "wb") as f:
+   84      t_end = time.time() + 60
+   85      while time.time() < t_end:
+   86          b = ser.read(4096)
+   87          if b: f.write(b)
+   88  print("wrote", fn)
+   89  PY
+   90  ls
+   91  cat eg4_gap.log 
+   92  ./inverter_soc_poller_serial.py --port /dev/ttySC1 --baud 9600 --parity N --slave 1 --stdout
+   93  ./inverter_soc_poller_serial.py --port /dev/ttySC1 --baud 9600 --parity N --slave 2 --stdout
+   94  ./inverter_soc_poller_serial.py --port /dev/ttySC1 --baud 19200 --parity N --slave 2 --stdout
+   95  ./inverter_soc_poller_serial.py --port /dev/ttySC1 --baud 19200 --parity N --slave 1 --stdout
+   96  ls
+   97  echo 39 > soc.txt
+   98  ./eg4_cv_emulator.py --port /dev/ttySC0 --baud 9600 --slave 0x01 --parity N
+   99  claude
+  100  exit
+  101  cd luxpower_485/
+  102  ./modbus_dump_input.py --port /dev/ttySC1 --baud 19200 --parity N --slave 1 --start 0 --count 200 --chunk 40 --timeout 2.0 --stop-on-illegal | tee scan_input_0_200_soc43.txt
+  103  ls
+  104  cd ..
+  105  ls
+  106  mv hold_0_499_soc_48_2025-12-27_215336.txt luxpower_485/.
+  107  cd luxpower_485/
+  108  SOC=42
+  109  ./modbus_dump_holding.py --port /dev/ttySC1 --baud 19200 --parity N --slave 1 --start 0 --count 500 --chunk 60 --timeout 2.0 --stop-on-illegal | tee "hold_0_499_soc_${SOC}$(date +%F%H%M%S).txt"
+  110  ls
+  111  ./modbus_dump_input.py --port /dev/ttySC1 --baud 19200 --parity N --slave 1 --start 0 --count 200 --chunk 40 --timeout 2.0 --stop-on-illegal | tee scan_input_0_200_soc41.txt
+  112  ./modbus_dump_input.py --port /dev/ttySC1 --baud 19200 --parity N --slave 0 --start 0 --count 200 --chunk 40 --timeout 2.0 --stop-on-illegal | tee scan_input_0_200_soc41_slave0.txt
+  113  ./modbus_dump_input.py --port /dev/ttySC1 --baud 19200 --parity N --slave 2 --start 0 --count 200 --chunk 40 --timeout 2.0 --stop-on-illegal | tee scan_input_0_200_soc41_slave2.txt
+  114  ls
+  115  screen
+  116  tmux
+  117  sudo apt install tmux
+  118  tmux
+  119  tmux -r
+  120  tmux ls
+  121  tmux attach
+  122  ./inverter_soc_poller_serial.py --port /dev/ttySC1 --baud 19200 --parity N --slave 1 --stdout
+  123  nano modbus_dump_inputs.py
+  124  chmod +x modbus_dump_inputs.py
+  125  ./modbus_dump_inputs.py --port /dev/ttySC1 --baud 19200 --parity N --slave 1 --start 0 --count 60
+  126  ./modbus_dump_inputs.py --port /dev/ttySC1 --baud 19200 --parity N --slave 1 --start 0 --count 10
+  127  nano modbus_dump_holding.py
+  128  chmod +x modbus_dump_holding.py
+  129  ./modbus_dump_holding.py --port /dev/ttySC1 --baud 19200 --parity N --slave 1 --start 0 --count 120 | tee holding_0_119.txt
+  130  egrep " =\s+55\b|=\s+550\b|=\s+551\b|=\s+549\b|=\s+5500\b" holding_0_119.txt
+  131  nano modbus_read_one.;y
+  132  [200~cat > modbus_read_one.py <<'PY'
+  133  #!/usr/bin/env python3
+  134  import argparse, datetime as dt, serial, time
+  135  def crc16_modbus(data: bytes) -> int:
+  136      crc = 0xFFFF
+  137      for b in data:
+  138          crc ^= b
+  139          for _ in range(8):
+  140              crc = (crc >> 1) ^ 0xA001 if (crc & 1) else (crc >> 1)
+  141      return crc & 0xFFFF
+  142  def build_req(slave: int, func: int, start: int, qty: int) -> bytes:
+  143      p = bytes([slave, func, (start>>8)&0xFF, start&0xFF, (qty>>8)&0xFF, qty&0xFF])
+  144      c = crc16_modbus(p)
+  145      return p + bytes([c & 0xFF, (c>>8) & 0xFF])
+  146  def read_exact(ser, n: int) -> bytes:
+  147      buf = b""
+  148      t0 = time.time()
+  149      while len(buf) < n and (time.time() - t0) < (ser.timeout or 1.0) + 0.2:
+  150          chunk = ser.read(n - len(buf))
+  151          if not chunk:
+  152              break
+  153          buf += chunk
+  154      return buf
+  155  def main():
+  156      ap = argparse.ArgumentParser()
+  157      ap.add_argument("--port", required=True)
+  158      ap.add_argument("--baud", type=int, default=19200)
+  159      ap.add_argument("--parity", choices=["N","E","O"], default="N")
+  160      ap.add_argument("--slave", type=lambda x: int(x,0), default=1)
+  161      ap.add_argument("--func", type=lambda x: int(x,0), default=3, help="3=holding, 4=input")
+  162      ap.add_argument("--start", type=lambda x: int(x,0), required=True)
+  163      ap.add_argument("--count", type=int, default=1)
+  164      ap.add_argument("--timeout", type=float, default=1.5)
+  165      args = ap.parse_args()
+  166      parity_map = {"N": serial.PARITY_NONE, "E": serial.PARITY_EVEN, "O": serial.PARITY_ODD}
+  167      ser = serial.Serial(args.port, args.baud, parity=parity_map[args.parity],
+  168                          stopbits=1, bytesize=8, timeout=args.timeout)
+  169      req = build_req(args.slave, args.func, args.start, args.count)
+  170      ser.reset_input_buffer()
+  171      ser.write(req)
+  172      # First read 5 bytes to detect normal vs exception
+  173      head = read_exact(ser, 5)
+  174      if len(head) == 0:
+  175          print(f"{dt.datetime.now().isoformat(timespec='seconds')} NO RESPONSE")
+  176          return
+  177      if len(head) < 5:
+  178          print(f"{dt.datetime.now().isoformat(timespec='seconds')} SHORT HEADER {len(head)}: {head.hex(' ')}")
+  179          return
+  180      slave, func, b2, b3, b4 = head[0], head[1], head[2], head[3], head[4]
+  181      # Exception response: slave, func|0x80, exc_code, crc_lo, crc_hi  (5 bytes total)
+  182      if func & 0x80:
+  183          body = head[:3]
+  184          crc_rx = head[3] | (head[4] << 8)
+  185          ok = (crc16_modbus(body) == crc_rx)
+  186          print(f"{dt.datetime.now().isoformat(timespec='seconds')} EXC slave={slave} func=0x{func:02X} code=0x{b2:02X} crc_ok={ok}")
+  187          return
+  188      # Normal response: slave, func, bytecount, data..., crc
+  189      bytecount = b2
+  190      rest_len = bytecount + 2  # data + crc
+  191      rest = read_exact(ser, rest_len)
+  192      if len(rest) != rest_len:
+  193          print(f"{dt.datetime.now().isoformat(timespec='seconds')} SHORT REST {len(rest)}/{rest_len}: {(head+rest).hex(' ')}")
+  194          return
+  195      resp = head + rest
+  196      body = resp[:-2]
+  197      crc_rx = resp[-2] | (resp[-1] << 8)
+  198      crc_ok = (crc16_modbus(body) == crc_rx)
+  199      data = resp[3:3+bytecount]
+  200      regs = [ (data[i] << 8) | data[i+1] for i in range(0, len(data), 2) ]
+  201      print(f"{dt.datetime.now().isoformat(timespec='seconds')} OK func={args.func} start={args.start} count={args.count} crc_ok={crc_ok}")
+  202      for i, v in enumerate(regs):
+  203          addr = args.start + i
+  204          print(f"  {addr:5d} (0x{addr:04X}) = {v:5d} (0x{v:04X})")
+  205  if __name__ == "__main__":
+  206      main()
+  207  PY
+  208  chmod +x modbus_read_one.py~
+  209  cat > modbus_read_one.py <<'PY'
+  210  #!/usr/bin/env python3
+  211  import argparse, datetime as dt, serial, time
+  212  def crc16_modbus(data: bytes) -> int:
+  213      crc = 0xFFFF
+  214      for b in data:
+  215          crc ^= b
+  216          for _ in range(8):
+  217              crc = (crc >> 1) ^ 0xA001 if (crc & 1) else (crc >> 1)
+  218      return crc & 0xFFFF
+  219  def build_req(slave: int, func: int, start: int, qty: int) -> bytes:
+  220      p = bytes([slave, func, (start>>8)&0xFF, start&0xFF, (qty>>8)&0xFF, qty&0xFF])
+  221      c = crc16_modbus(p)
+  222      return p + bytes([c & 0xFF, (c>>8) & 0xFF])
+  223  def read_exact(ser, n: int) -> bytes:
+  224      buf = b""
+  225      t0 = time.time()
+  226      while len(buf) < n and (time.time() - t0) < (ser.timeout or 1.0) + 0.2:
+  227          chunk = ser.read(n - len(buf))
+  228          if not chunk:
+  229              break
+  230          buf += chunk
+  231      return buf
+  232  def main():
+  233      ap = argparse.ArgumentParser()
+  234      ap.add_argument("--port", required=True)
+  235      ap.add_argument("--baud", type=int, default=19200)
+  236      ap.add_argument("--parity", choices=["N","E","O"], default="N")
+  237      ap.add_argument("--slave", type=lambda x: int(x,0), default=1)
+  238      ap.add_argument("--func", type=lambda x: int(x,0), default=3, help="3=holding, 4=input")
+  239      ap.add_argument("--start", type=lambda x: int(x,0), required=True)
+  240      ap.add_argument("--count", type=int, default=1)
+  241      ap.add_argument("--timeout", type=float, default=1.5)
+  242      args = ap.parse_args()
+  243      parity_map = {"N": serial.PARITY_NONE, "E": serial.PARITY_EVEN, "O": serial.PARITY_ODD}
+  244      ser = serial.Serial(args.port, args.baud, parity=parity_map[args.parity],
+  245                          stopbits=1, bytesize=8, timeout=args.timeout)
+  246      req = build_req(args.slave, args.func, args.start, args.count)
+  247      ser.reset_input_buffer()
+  248      ser.write(req)
+  249      # First read 5 bytes to detect normal vs exception
+  250      head = read_exact(ser, 5)
+  251      if len(head) == 0:
+  252          print(f"{dt.datetime.now().isoformat(timespec='seconds')} NO RESPONSE")
+  253          return
+  254      if len(head) < 5:
+  255          print(f"{dt.datetime.now().isoformat(timespec='seconds')} SHORT HEADER {len(head)}: {head.hex(' ')}")
+  256          return
+  257      slave, func, b2, b3, b4 = head[0], head[1], head[2], head[3], head[4]
+  258      # Exception response: slave, func|0x80, exc_code, crc_lo, crc_hi  (5 bytes total)
+  259      if func & 0x80:
+  260          body = head[:3]
+  261          crc_rx = head[3] | (head[4] << 8)
+  262          ok = (crc16_modbus(body) == crc_rx)
+  263          print(f"{dt.datetime.now().isoformat(timespec='seconds')} EXC slave={slave} func=0x{func:02X} code=0x{b2:02X} crc_ok={ok}")
+  264          return
+  265      # Normal response: slave, func, bytecount, data..., crc
+  266      bytecount = b2
+  267      rest_len = bytecount + 2  # data + crc
+  268      rest = read_exact(ser, rest_len)
+  269      if len(rest) != rest_len:
+  270          print(f"{dt.datetime.now().isoformat(timespec='seconds')} SHORT REST {len(rest)}/{rest_len}: {(head+rest).hex(' ')}")
+  271          return
+  272      resp = head + rest
+  273      body = resp[:-2]
+  274      crc_rx = resp[-2] | (resp[-1] << 8)
+  275      crc_ok = (crc16_modbus(body) == crc_rx)
+  276      data = resp[3:3+bytecount]
+  277      regs = [ (data[i] << 8) | data[i+1] for i in range(0, len(data), 2) ]
+  278      print(f"{dt.datetime.now().isoformat(timespec='seconds')} OK func={args.func} start={args.start} count={args.count} crc_ok={crc_ok}")
+  279      for i, v in enumerate(regs):
+  280          addr = args.start + i
+  281          print(f"  {addr:5d} (0x{addr:04X}) = {v:5d} (0x{v:04X})")
+  282  if __name__ == "__main__":
+  283      main()
+  284  PY
+  285  chmod +x modbus_read_one.py
+  286  ls
+  287  ./modbus_read_one.py --port /dev/ttySC1 --baud 19200 --parity N --slave 1 --func 4 --start 5 --count 1
+  288  ./inverter_soc_poller_serial.py --port /dev/ttySC1 --baud 19200 --parity N --slave 1 --stdout
+  289  nano modbus_read_one.py
+  290  rm modbus_read_one.py 
+  291  nano modbus_read_one.py
+  292  chmod +x modbus_read_one.py
+  293  ./modbus_read_one.py --port /dev/ttySC1 --baud 19200 --parity N --slave 1 --func 4 --start 5 --count 1
+  294  ./inverter_soc_poller_serial.py --port /dev/ttySC1 --baud 19200 --parity N --slave 1 --stdout
+  295  sudo fuser -v /dev/ttySC1 || true
+  296  grep -nE "TIOCSRS485|ioctl|RS485|rts|cts|crtscts|tcsetattr|termios" inverter_soc_poller_serial.py
+  297  grep -n "def set_" -n inverter_soc_poller_serial.py
+  298  nl -ba inverter_soc_poller_serial.py | sed -n '1,160p'
+  299  rm modbus_read_one.py 
+  300  nano modbus_read_one.py
+  301  chmod +x modbus_read_one.py
+  302  ./modbus_read_one.py --port /dev/ttySC1 --baud 19200 --parity N --slave 1 --func 4 --start 5 --count 1
+  303  for r in $(seq 0 40); do   ./modbus_read_one.py --port /dev/ttySC1 --baud 19200 --parity N --slave 1 --func 4 --start $r --count 1 | tail -n 1 | sed "s/^/r=$r /"; done | tee scan_input_0_40.txt
+  304  for r in $(seq 0 120); do   ./modbus_read_one.py --port /dev/ttySC1 --baud 19200 --parity N --slave 1 --func 3 --start $r --count 1 | tail -n 1 | sed "s/^/r=$r /"; done | tee scan_hold_0_120.txt
+  305  egrep "=\s*(55|54|56)\b|=\s*(550|540|560)\b|=\s*(5500|5400|5600)\b" scan_hold_0_120.txt
+  306  ./modbus_read_one.py --port /dev/ttySC1 --baud 19200 --parity N --slave 1 --func 3 --start 107 --count 1
+  307  for r in $(seq 0 120); do   ./modbus_read_one.py --port /dev/ttySC1 --baud 19200 --parity N --slave 1 --func 3 --start $r --count 1 | tail -n 1 | sed "s/^/r=$r /"; done | tee scan_hold_0_120_a.txt
+  308  diff -u <(sed -n 's/^r=\([0-9]\+\).*=\s*\([0-9]\+\).*/\1 \2/p' scan_hold_0_120.txt)         <(sed -n 's/^r=\([0-9]\+\).*=\s*\([0-9]\+\).*/\1 \2/p' scan_hold_0_120_a.txt)
+  309  ./modbus_dump_holding.py --port /dev/ttySC1 --baud 19200 --parity N --slave 1 --start 0 --count 1200 | tee scan_hold_0_1200_b.txt
+  310  grep -n "rs485_mode" modbus_dump_holding.py || echo "NO rs485_mode in modbus_dump_holding.py"
+  311  ./modbus_read_one.py --port /dev/ttySC1 --baud 19200 --parity N --slave 1 --func 3 --start 0 --count 60
+  312  nano modbus_dump_holding.py
+  313  rm modbus_dump_holding.py 
+  314  nano modbus_dump_holding.py
+  315  chmod +x modbus_dump_holding.py
+  316  ./modbus_dump_holding.py --port /dev/ttySC1 --baud 19200 --parity N --slave 1 --start 0 --count 1200 --chunk 60 | tee scan_hold_0_1200_b.txt
+  317  rm modbus_dump_holding.py 
+  318  nano modbus_dump_holding.py
+  319  chmod +x modbus_dump_holding.py
+  320  ./modbus_dump_holding.py --port /dev/ttySC1 --baud 19200 --parity N --slave 1 --start 0 --count 1200 --chunk 60 --stop-on-illegal | tee scan_hold_0_1200_b.txt
+  321  rm modbus_dump_holding.py 
+  322  nano modbus_dump_holding.py
+  323  chmod +x modbus_dump_holding.py
+  324  ./modbus_dump_holding.py --port /dev/ttySC1 --baud 19200 --parity N --slave 1 --start 0 --count 1200 --chunk 60 --timeout 2.0 --stop-on-illegal | tee scan_hold_0_1200_b.txt
+  325  ./modbus_read_one.py --port /dev/ttySC1 --baud 19200 --parity N --slave 1 --func 3 --start 480 --count 1
+  326  for a in $(seq 480 600); do   out=$(./modbus_read_one.py --port /dev/ttySC1 --baud 19200 --parity N --slave 1 --func 3 --start $a --count 1 2>&1);   echo "$out" | grep -q "ERROR" && { echo "FIRST FAIL AT $a"; echo "$out"; break; };   echo "$out" | tail -n 1; done
+  327  rm modbus_dump_holding.py 
+  328  nano modbus_dump_holding.py
+  329  chmod +x modbus_dump_holding.py
+  330  ./modbus_dump_holding.py --port /dev/ttySC1 --baud 19200 --parity N --slave 1   --start 470 --count 60 --chunk 60 --timeout 2.0 --stop-on-illegal
+  331  SOC=48
+  332  ./modbus_dump_holding.py --port /dev/ttySC1 --baud 19200 --parity N --slave 1   --start 0 --count 500 --chunk 60 --timeout 2.0 --stop-on-illegal   | tee "hold_0_499_soc_${SOC}_$(date +%F_%H%M%S).txt"
+  333  ./modbus_read_one.py --port /dev/ttySC1 --baud 19200 --parity N --slave 1 --func 4 --start 0 --count 10
+  334  ./modbus_dump_input.py --port /dev/ttySC1 --baud 19200 --parity N --slave 1   --start 0 --count 200 --chunk 40 --timeout 2.0 --stop-on-illegal   | tee scan_input_0_200_soc48.txt
+  335  nano modbus_dump_input.py
+  336  chmod +x modbus_dump_input.py
+  337  ./modbus_dump_input.py   --port /dev/ttySC1   --baud 19200   --parity N   --slave 1   --start 0   --count 200   --chunk 40   --timeout 2.0   --stop-on-illegal   | tee scan_input_0_200_soc48.txt
+  338  ls
+  339  git clone git@github.com:derekja/luxpower_485.git
+  340  git --version
+  341  git config --global user.name "derekja"
+  342  git config --global user.email "derekja@gmail.com"
+  343  ssh-keygen -t ed25519 -C "derekja@gmail.com"
+  344  $ eval "$(ssh-agent -s)"
+  345  eval "$(ssh-agent -s)"
+  346  ssh-add ~/.ssh/githubmomspi
+  347  ls ~/.ssh
+  348  ls
+  349  mv github* .ssh/.
+  350  ssh-add ~/.ssh/githubmomspi
+  351  nano .bashrc
+  352  npm install -g @anthropic-ai/claude-code
+  353  curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash - &&sudo apt-get install -y nodejs
+  354  (type -p wget >/dev/null || (sudo apt update && sudo apt install wget -y)) 	&& sudo mkdir -p -m 755 /etc/apt/keyrings 	&& out=$(mktemp) && wget -nv -O$out https://cli.github.com/packages/githubcli-archive-keyring.gpg 	&& cat $out | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null 	&& sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg 	&& sudo mkdir -p -m 755 /etc/apt/sources.list.d 	&& echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null 	&& sudo apt update 	&& sudo apt install gh -y
+  355  npm install -g @anthropic-ai/claude-code
+  356  npm install -g npm@11.7.0
+  357  apt-get install -y nodejs
+  358  sudo npm install -g @anthropic-ai/claude-code
+  359  curl https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip
+  360  curl https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip --output awscli.zip
+  361  unzip awscli.zip 
+  362  sudo ./aws/install
+  363  aws configure
+  364  claude
+  365  bash
+  366  ./modbus_dump_input.py   --port /dev/ttySC1   --baud 19200   --parity N   --slave 1   --start 0   --count 200   --chunk 40   --timeout 2.0   --stop-on-illegal   | tee scan_input_0_200_soc44.txt
+  367  ls
+  368  gh auth login
+  369  git clone git@github.com:derekja/luxpower_485.git
+  370  ls
+  371  mv modbus_dump_input.py luxpower_485/.
+  372  mv modbus_read_one.py luxpower_485/.
+  373  mv scan_input_0_200_soc4* luxpower_485/.
+  374  mv modbus_dump_holding.py luxpower_485/.
+  375  ls
+  376  cd luxpower_485/
+  377  git status
+  378  git add .
+  379  git commit -m "initial from gpt"
+  380  git push
+  381  claude
+  382  bash
+  383  claude
+  384  cd pigenny
+  385  python3 gen_server.py  
+  386  git pull
+  387  python3 gen_server.py  
+  388  git pull
+  389  python3 gen_server.py  
+  390  ls
+  391  cd luxpower_485/
+  392  git status
+  393  git pull
+  394  cd ..
+  395  git clone git@github.com:derekja/pigenny.git
+  396  cd pig
+  397  cd pigenny/
+  398  ls
+  399  cd ..
+  400  cd pigenny/
+  401  lsblk
+  402  sudo mkdir -p /mnt/olimex
+  403  sudo mount /dev/sda2 /mnt/olimex 
+  404  nano install_diagnostic.sh 
+  405  sudo ./install_diagnostic.sh /mnt/olimex
+  406  ls
+  407  sudo chmod +x install_diagnostic.sh 
+  408  sudo ./install_diagnostic.sh /mnt/olimex
+  409  sudo umount /mnt/olimex
+  410  sudo mount /dev/sda2 /mnt/olimex 
+  411  lsblk
+  412  sudo mount /dev/sda2 /mnt/olimex 
+  413  pushd /mnt/olimex/var/log
+  414  ls
+  415  popd
+  416  git pull
+  417  git stash
+  418  git pull
+  419  sudo chmod +x install_diagnostic.sh 
+  420  sudo ./install_diagnostic.sh /mnt/olimex
+  421  sudo umount /mnt/olimex
+  422  lsblk
+  423  sudo mount /dev/sda2 /mnt/olimex 
+  424  pushd /mnt/olimex/var/log
+  425  ls
+  426  ls -la /mnt/olimex/usr/local/bin/diagnose_inputs.py
+  427  ls -la /mnt/olimex/etc/systemd/system/gen-diagnostic.service
+  428  ls -la /mnt/olimex/etc/systemd/system/multi-user.target.wants/
+  429  ls -la /mnt/olimex/var/log/gen*.txt /mnt/olimex/var/log/gen*.log 2>/dev/null
+  430  ls -la /mnt/olimex/tmp/gen*.txt /mnt/olimex/tmp/gen*.log
+  431  popd
+  432  git stash
+  433  git pull
+  434  sudo chmod +x install_diagnostic.sh 
+  435  sudo ./install_diagnostic.sh /mnt/olimex
+  436  sudo umount /mnt/olimex
+  437  lsblk
+  438  sudo mount /dev/sda2 /mnt/olimex 
+  439  pushd /mnt/olimex/var/log
+  440  ls
+  441  cat gen_diag_started.txt 
+  442  cat gen_diagnostic.log 
+  443  popd
+  444  git stash
+  445  ls -la
+  446  cd .git
+  447  ls -la
+  448  du -h
+  449  cd ..
+  450  git pull
+  451  python3 gen_client.py --host localhost
+  452  git pull
+  453  pushd /mnt/olimex
+  454  ls
+  455  popd
+  456  sudo chmod +x install_server.sh 
+  457  sudo ./install_server.sh /mnt/olimex
+  458  sudo umount /mnt/olimex
+  459  sudo ip addr add 10.2.242.1/24 dev eth0
+  460  sudo shutdown
+  461  sudo shutdown -now
+  462  sudo shutdown --now
+  463  python3 monitor.py --inverter-port /dev/ttySC1 --inverter-baud 19200 --soc-start 40 --soc-stop 80 --generator-host 10.2.242.109
+  464  git status
+  465  nano .gitignore
+  466  git status
+  467  git add .
+  468  git commit -m "working monitor"
+  469  git push
+  470  cd ..
+  471  ls
+  472  cd luxpower_485/
+  473  ls
+  474  cd ..
+  475  lsblk
+  476  sudo mount /dev/sda2 /mnt/olimex
+  477  cd pigenny/
+  478  git pull
+  479  ls
+  480  sudo chmod +x install_server.sh 
+  481  sudo ./install_server.sh /mnt/olimex
+  482  sudo umount /mnt/olimex
+  483  ssh derekja@10.2.242.109
+  484  python3 gen_client.py --host 10.2.242.109
+  485  history >>history
