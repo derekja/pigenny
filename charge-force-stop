@@ -1,0 +1,15 @@
+#!/bin/bash
+# Force stop generator regardless of SOC or mode
+# Usage: ./charge-force-stop
+
+FORCE_CHARGE_FILE="/tmp/pigenny_force_charge"
+FORCE_STOP_FILE="/tmp/pigenny_force_stop"
+
+# Remove force charge if present
+rm -f "$FORCE_CHARGE_FILE"
+
+# Create force stop file
+touch "$FORCE_STOP_FILE"
+
+echo "Force stop enabled - generator will stop on next poll cycle"
+echo "To return to normal operation: rm $FORCE_STOP_FILE"

@@ -45,6 +45,14 @@ from gen_client import GeneratorClient
 
 
 # =============================================================================
+# Manual Control Files
+# =============================================================================
+
+FORCE_CHARGE_FILE = '/tmp/pigenny_force_charge'
+FORCE_STOP_FILE = '/tmp/pigenny_force_stop'
+
+
+# =============================================================================
 # Configuration
 # =============================================================================
 
@@ -64,7 +72,7 @@ CONFIG = {
 
     # Timing
     'poll_interval': 30,          # Seconds between inverter reads
-    'generator_cooldown': 3600,   # Minimum seconds between generator runs
+    'error_recovery_wait': 3600,  # Seconds to wait after 3 failed starts before retrying
     'generator_max_runtime': 14400, # Maximum seconds for generator to run (4 hours)
 
     # Safety
@@ -87,8 +95,8 @@ class CSVLogger:
 
     CSV_FIELDS = [
         'timestamp', 'timestamp_unix', 'soc_pct', 'soh_pct', 'vbat_v',
-        'vpv1_v', 'vpv2_v', 'pv_power_w', 'charge_power_w', 'discharge_power_w',
-        'generator_state', 'generator_running'
+        'vpv1_v', 'vpv2_v', 'pv1_power_w', 'pv2_power_w', 'load_power_w',
+        'charge_power_w', 'discharge_power_w', 'generator_state', 'generator_running'
     ]
 
     def __init__(self, log_dir, prefix='data_'):
@@ -126,7 +134,9 @@ class CSVLogger:
             'vbat_v': inverter_data.get('battery_voltage', ''),
             'vpv1_v': inverter_data.get('pv1_voltage', ''),
             'vpv2_v': inverter_data.get('pv2_voltage', ''),
-            'pv_power_w': inverter_data.get('pv_power', ''),
+            'pv1_power_w': inverter_data.get('pv1_power', ''),
+            'pv2_power_w': inverter_data.get('pv2_power', ''),
+            'load_power_w': inverter_data.get('load_power', ''),
             'charge_power_w': inverter_data.get('charge_power', ''),
             'discharge_power_w': inverter_data.get('discharge_power', ''),
             'generator_state': generator_state,
@@ -253,10 +263,19 @@ class InverterMonitor:
                 'battery_voltage': regs[4] / 10.0,
                 'pv1_voltage': regs[1] / 10.0,
                 'pv2_voltage': regs[2] / 10.0,
-                'pv_power': regs[9],
+                'pv1_power': regs[7],
+                'pv2_power': regs[8],
                 'charge_power': regs[10],
                 'discharge_power': regs[11],
             }
+
+            # Read register 170 for load power (separate read since not contiguous)
+            result2 = self.client.read_input_registers(170, count=1, slave=self.slave_id)
+            if not result2.isError():
+                data['load_power'] = result2.registers[0]
+            else:
+                data['load_power'] = 0  # Default if read fails
+
             return data
 
         except Exception as e:
@@ -276,7 +295,7 @@ class PiGennyMonitor:
     STATE_STARTING = 'STARTING'
     STATE_RUNNING = 'RUNNING'
     STATE_STOPPING = 'STOPPING'
-    STATE_COOLDOWN = 'COOLDOWN'
+    STATE_ERROR_RECOVERY = 'ERROR_RECOVERY'
     STATE_ERROR = 'ERROR'
 
     def __init__(self, config):
@@ -312,10 +331,22 @@ class PiGennyMonitor:
         self.generator_started_at = None
         self.generator_stopped_at = None
         self.start_attempts = 0
+        self.error_recovery_started_at = None
 
         # Last readings
         self.last_soc = None
         self.last_voltage = None
+
+        # Manual control mode
+        self.manual_mode = False
+
+    def check_force_charge(self):
+        """Check if force charge file exists"""
+        return os.path.exists(FORCE_CHARGE_FILE)
+
+    def check_force_stop(self):
+        """Check if force stop file exists"""
+        return os.path.exists(FORCE_STOP_FILE)
 
     def connect(self):
         """Connect to inverter and generator"""
@@ -363,7 +394,7 @@ class PiGennyMonitor:
             response = self.generator.start()
             log.info(f"Start response: {response}")
 
-            if "OK" in response:
+            if response.startswith("OK:"):
                 self.state = self.STATE_RUNNING
                 self.generator_started_at = datetime.now()
                 self.start_attempts = 0
@@ -382,7 +413,7 @@ class PiGennyMonitor:
             return False
 
     def stop_generator(self):
-        """Stop the generator"""
+        """Stop the generator (normal stop - goes to IDLE when done)"""
         log.info("Stopping generator...")
         self.state = self.STATE_STOPPING
 
@@ -390,23 +421,27 @@ class PiGennyMonitor:
             response = self.generator.stop()
             log.info(f"Stop response: {response}")
 
-            self.state = self.STATE_COOLDOWN
+            self.state = self.STATE_IDLE
             self.generator_stopped_at = datetime.now()
             self.generator_started_at = None
             return True
 
         except Exception as e:
             log.error(f"Generator stop exception: {e}")
+            # Even on error, transition to idle - generator likely already stopped
+            # or connection failed. Better to go to idle than stay stuck in STOPPING.
+            self.state = self.STATE_IDLE
+            self.generator_stopped_at = datetime.now()
+            self.generator_started_at = None
             return False
 
-    def check_cooldown(self):
-        """Check if cooldown period has passed"""
-        if self.generator_stopped_at is None:
+    def check_error_recovery_wait(self):
+        """Check if error recovery wait period has passed (1 hour after 3 failed starts)"""
+        if self.error_recovery_started_at is None:
             return True
 
-        elapsed = (datetime.now() - self.generator_stopped_at).total_seconds()
-        if elapsed >= self.config['generator_cooldown']:
-            self.state = self.STATE_IDLE
+        elapsed = (datetime.now() - self.error_recovery_started_at).total_seconds()
+        if elapsed >= self.config['error_recovery_wait']:
             return True
         return False
 
@@ -421,7 +456,7 @@ class PiGennyMonitor:
     def check_olimex_health(self):
         """Check Olimex system health and log metrics"""
         try:
-            status_text = self.generator.get_status()
+            status_text = self.generator.status()
             if not status_text:
                 log.warning("Failed to get Olimex health status")
                 return
@@ -453,7 +488,8 @@ class PiGennyMonitor:
             self.last_soc = data['soc']
             self.last_voltage = data['battery_voltage']
             log.info(f"SOC: {data['soc']}% | Voltage: {data['battery_voltage']}V | "
-                    f"PV: {data['pv_power']}W | Charge: {data['charge_power']}W | "
+                    f"PV1: {data['pv1_power']}W | PV2: {data['pv2_power']}W | "
+                    f"Load: {data['load_power']}W | Charge: {data['charge_power']}W | "
                     f"Discharge: {data['discharge_power']}W")
 
             # Log to CSV at specified interval
@@ -490,31 +526,129 @@ class PiGennyMonitor:
 
         soc = data['soc']
 
+        # Check manual control files
+        force_charge = self.check_force_charge()
+        force_stop = self.check_force_stop()
+
         # State machine
         if self.state == self.STATE_IDLE:
-            # Check if we need to start
-            if soc < self.config['soc_start_threshold']:
+            # Check for manual force charge
+            if force_charge:
+                log.info("Force charge file detected - starting generator (manual mode)")
+                self.manual_mode = True
+                self.start_generator()
+            # Check if we need to start based on SOC
+            elif soc < self.config['soc_start_threshold']:
                 log.info(f"SOC {soc}% below threshold {self.config['soc_start_threshold']}% - starting generator")
+                self.manual_mode = False
                 self.start_generator()
 
         elif self.state == self.STATE_RUNNING:
-            # Check if we should stop
-            if soc >= self.config['soc_stop_threshold']:
+            # Check for manual force stop (highest priority)
+            if force_stop:
+                log.info("Force stop file detected - stopping generator (manual override)")
+                self.manual_mode = False
+                self.stop_generator()
+                # Remove force_stop file so normal operation resumes
+                try:
+                    os.remove(FORCE_STOP_FILE)
+                    log.info("Force stop file removed - normal operation will resume")
+                except:
+                    pass
+            # Check if manual mode was cancelled (force_charge file removed)
+            elif self.manual_mode and not force_charge:
+                log.info("Force charge file removed - stopping generator (exiting manual mode)")
+                self.manual_mode = False
+                self.stop_generator()
+            # Check if generator unexpectedly stopped (fuel out, stall, etc)
+            elif not self.is_generator_running():
+                log.error("Generator stopped unexpectedly (fuel out, stall, or mechanical failure)")
+                log.info("Entering error recovery mode - will attempt restarts")
+                # Clear relays via stop command, then enter error recovery
+                try:
+                    self.generator.stop()
+                except:
+                    pass  # Best effort to clear relays
+                self.state = self.STATE_ERROR_RECOVERY
+                self.error_recovery_started_at = datetime.now()
+                self.generator_started_at = None
+                self.manual_mode = False
+                # Don't reset start_attempts - let it accumulate
+            # Check if we should stop based on SOC (only if not in manual mode)
+            elif not self.manual_mode and soc >= self.config['soc_stop_threshold']:
                 log.info(f"SOC {soc}% reached threshold {self.config['soc_stop_threshold']}% - stopping generator")
                 self.stop_generator()
             elif self.check_max_runtime():
                 log.warning("Generator max runtime exceeded - stopping")
+                self.manual_mode = False
                 self.stop_generator()
 
-        elif self.state == self.STATE_COOLDOWN:
-            if self.check_cooldown():
-                log.info("Cooldown complete, returning to idle")
+        elif self.state == self.STATE_STOPPING:
+            # Verify generator has stopped and transition to idle
+            # This state should be transient (stop_generator sets it then immediately transitions)
+            # but if we're stuck here, verify and move on to prevent infinite hang
+            try:
+                status = self.generator.status()
+                if status and "RUNNING: NO" in status:
+                    log.info("Verified generator stopped, transitioning to idle")
+                    self.state = self.STATE_IDLE
+                    if self.generator_stopped_at is None:
+                        self.generator_stopped_at = datetime.now()
+                        self.generator_started_at = None
+                else:
+                    log.warning("Still in STOPPING state - generator may still be running")
+                    # Transition to idle anyway after one check to avoid infinite loop
+                    self.state = self.STATE_IDLE
+                    if self.generator_stopped_at is None:
+                        self.generator_stopped_at = datetime.now()
+                        self.generator_started_at = None
+            except Exception as e:
+                log.warning(f"Failed to verify generator status in STOPPING state: {e}")
+                # Can't verify, assume stopped and transition to idle
+                self.state = self.STATE_IDLE
+                if self.generator_stopped_at is None:
+                    self.generator_stopped_at = datetime.now()
+                    self.generator_started_at = None
+
+        elif self.state == self.STATE_ERROR_RECOVERY:
+            # Error recovery: try to restart, with rate limiting after 3 failures
+            if self.start_attempts >= self.config['max_start_attempts']:
+                # Already tried 3 times, check if wait period has passed
+                if self.check_error_recovery_wait():
+                    log.info("Error recovery wait complete, resetting attempts and retrying")
+                    self.start_attempts = 0
+                    self.error_recovery_started_at = None
+                    # Will attempt start on next cycle
+                else:
+                    elapsed = (datetime.now() - self.error_recovery_started_at).total_seconds()
+                    remaining = self.config['error_recovery_wait'] - elapsed
+                    log.warning(f"In error recovery - {self.start_attempts} failed attempts, "
+                               f"waiting {remaining/60:.0f} more minutes before retry")
+            else:
+                # Still have attempts remaining, try to start if SOC is low
+                if soc < self.config['soc_start_threshold']:
+                    log.info(f"Error recovery: attempting restart (attempt {self.start_attempts + 1})")
+                    if self.start_generator():
+                        # Success! Clear error recovery state
+                        self.error_recovery_started_at = None
+                    elif self.start_attempts >= self.config['max_start_attempts']:
+                        # Just hit max attempts, start the wait timer
+                        log.error(f"Error recovery: {self.start_attempts} consecutive failures, "
+                                 f"waiting {self.config['error_recovery_wait']/60:.0f} minutes before retry")
+                        self.error_recovery_started_at = datetime.now()
+                else:
+                    # SOC recovered (maybe from solar), exit error recovery
+                    log.info(f"SOC {soc}% recovered above threshold, exiting error recovery")
+                    self.state = self.STATE_IDLE
+                    self.start_attempts = 0
+                    self.error_recovery_started_at = None
 
         elif self.state == self.STATE_ERROR:
             log.error(f"In error state after {self.start_attempts} failed start attempts")
-            # Could implement recovery logic here
+            # Legacy error state - shouldn't reach here with new logic
 
-        log.info(f"State: {self.state}")
+        mode_str = " (MANUAL)" if self.manual_mode else ""
+        log.info(f"State: {self.state}{mode_str}")
 
     def run(self):
         """Main monitoring loop"""
@@ -524,6 +658,8 @@ class PiGennyMonitor:
         log.info(f"Poll interval: {self.config['poll_interval']}s, "
                 f"CSV log interval: {self.log_interval}s ({self.log_interval/60:.0f} min)")
         log.info(f"CSV log directory: {self.config['csv_log_dir']}")
+        log.info(f"Manual control: touch {FORCE_CHARGE_FILE} to start, "
+                f"rm to stop, or touch {FORCE_STOP_FILE} to force stop")
 
         if not self.connect():
             return 1

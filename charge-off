@@ -1,0 +1,12 @@
+#!/bin/bash
+# Stop generator charging (exit manual mode or force stop)
+# Usage: ./charge-off
+
+FORCE_CHARGE_FILE="/tmp/pigenny_force_charge"
+FORCE_STOP_FILE="/tmp/pigenny_force_stop"
+
+# Remove force charge file (will trigger stop if in manual mode)
+rm -f "$FORCE_CHARGE_FILE"
+
+echo "Manual charging disabled - generator will stop on next poll cycle (if in manual mode)"
+echo "To force immediate stop regardless of SOC: touch $FORCE_STOP_FILE"

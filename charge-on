@@ -1,0 +1,15 @@
+#!/bin/bash
+# Start generator charging (manual mode)
+# Usage: ./charge-on
+
+FORCE_CHARGE_FILE="/tmp/pigenny_force_charge"
+FORCE_STOP_FILE="/tmp/pigenny_force_stop"
+
+# Remove force stop if present
+rm -f "$FORCE_STOP_FILE"
+
+# Create force charge file
+touch "$FORCE_CHARGE_FILE"
+
+echo "Manual charging enabled - generator will start on next poll cycle"
+echo "To stop: ./charge-off or rm $FORCE_CHARGE_FILE"

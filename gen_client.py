@@ -54,6 +54,36 @@ class GeneratorClient:
             self.socket.close()
             self.socket = None
 
+    def _flush_receive_buffer(self):
+        """Flush any stale data from the receive buffer.
+
+        This prevents issues where old STATUS responses are read
+        instead of the expected command response.
+        """
+        self.socket.setblocking(False)
+        flushed_bytes = 0
+        try:
+            while True:
+                try:
+                    data = self.socket.recv(1024)
+                    if not data:
+                        break
+                    flushed_bytes += len(data)
+                except BlockingIOError:
+                    # No more data available
+                    break
+                except socket.error:
+                    break
+        finally:
+            self.socket.setblocking(True)
+            self.socket.settimeout(self.timeout)
+
+        if flushed_bytes > 0:
+            import sys
+            print(f"Warning: Flushed {flushed_bytes} stale bytes from TCP buffer", file=sys.stderr)
+
+        return flushed_bytes
+
     def _readline(self):
         """Read a line from the socket"""
         data = b""
@@ -95,12 +125,36 @@ class GeneratorClient:
         """Get generator status"""
         return self.send_command("STATUS")
 
+    def reconnect(self):
+        """Close and reopen the connection to clear any queued commands."""
+        try:
+            if self.socket:
+                self.socket.close()
+        except:
+            pass
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.socket.settimeout(self.timeout)
+        self.socket.connect((self.host, self.port))
+        # Read welcome message
+        self._readline()
+
     def start(self):
-        """Start the generator"""
+        """Start the generator.
+
+        Reconnects first to ensure no stale/queued commands exist on the
+        server side (previous timed-out STARTs could still be queued).
+        Also flushes receive buffer for safety.
+        """
+        self.reconnect()
+        self._flush_receive_buffer()
         return self.send_command("START")
 
     def stop(self):
-        """Stop the generator"""
+        """Stop the generator.
+
+        Flushes receive buffer first to ensure we get the actual response.
+        """
+        self._flush_receive_buffer()
         return self.send_command("STOP")
 
     def ping(self):
@@ -117,10 +171,42 @@ class GeneratorClient:
             value = "%02X" % value
         return self.send_command("RELAY %s" % value)
 
-    def is_running(self):
-        """Check if generator is running"""
+    def is_running(self, debounce_checks=3, debounce_interval=2):
+        """Check if generator is running with debouncing.
+
+        After fuel-out restarts, the generator may stumble briefly before
+        stabilizing or dying. This debounces the check to avoid false
+        "stopped unexpectedly" triggers during brief stumbles.
+
+        Args:
+            debounce_checks: Number of consecutive "not running" checks required
+            debounce_interval: Seconds between checks
+
+        Returns True if running, False only if consistently not running.
+        """
+        self._flush_receive_buffer()
         status = self.status()
-        return "RUNNING: YES" in status
+
+        if "RUNNING: YES" in status:
+            return True
+
+        # First check said not running - debounce with additional checks
+        import sys
+        print(f"Generator check returned not running, debouncing with {debounce_checks-1} more checks...", file=sys.stderr)
+
+        not_running_count = 1
+        for i in range(debounce_checks - 1):
+            time.sleep(debounce_interval)
+            self._flush_receive_buffer()
+            status = self.status()
+            if "RUNNING: YES" in status:
+                print(f"Generator now running on recheck {i+1}", file=sys.stderr)
+                return True
+            not_running_count += 1
+            print(f"Generator still not running (check {not_running_count}/{debounce_checks})", file=sys.stderr)
+
+        # Consistently not running across all checks
+        return False
 
 
 def interactive_mode(client):
