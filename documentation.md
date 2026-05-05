@@ -304,6 +304,12 @@ The monitor runs on the Raspberry Pi and:
 usage: monitor.py [-h] [--test-inverter] [--test-generator]
                   [--inverter-port PORT] [--inverter-baud BAUD]
                   [--generator-host HOST] [--soc-start PCT] [--soc-stop PCT]
+                  [--soc-reserve PCT] [--disable-dynamic-charging]
+                  [--min-generator-charge-runtime SEC]
+                  [--generator-charge-rate PCT_PER_HOUR]
+                  [--disable-fuel-tracking]
+                  [--fuel-full-runtime-hours HOURS]
+                  [--fuel-alert-remaining-hours HOURS]
                   [--log-dir DIR] [--log-interval SEC]
 
 Options:
@@ -312,8 +318,24 @@ Options:
   --inverter-port PORT  Inverter serial port (default: /dev/ttySC1)
   --inverter-baud BAUD  Inverter baud rate (default: 19200)
   --generator-host HOST Generator server host (default: 10.2.242.109)
-  --soc-start PCT       SOC threshold to start generator (default: 25)
+  --soc-start PCT       Dynamic forecast zone threshold (default: 40)
   --soc-stop PCT        SOC threshold to stop generator (default: 80)
+  --soc-reserve PCT     Hard reserve SOC floor for dynamic charging (default: 25)
+  --disable-dynamic-charging
+                         Disable forecast charging and use static thresholds
+  --min-generator-charge-runtime SEC
+                         Minimum charger-enabled runtime for dynamic starts
+                         (default: 1800 = 30 minutes)
+  --generator-charge-rate PCT_PER_HOUR
+                         Estimated generator SOC charge rate (default: 19.0)
+  --disable-fuel-tracking
+                         Disable runtime-based fuel tracking and alerts
+  --fuel-full-runtime-hours HOURS
+                         Estimated generator runtime from a full tank
+                         (default: 12.0)
+  --fuel-alert-remaining-hours HOURS
+                         Send fuel warning below this runtime remaining
+                         (default: 4.0)
   --log-dir DIR         CSV log directory (default: /var/log/pigenny)
   --log-interval SEC    Seconds between CSV log entries (default: 600 = 10 min)
 ```
@@ -327,11 +349,11 @@ Options:
 python3 monitor.py --test-generator
 python3 monitor.py --test-inverter
 
-# Run with defaults (start at 25%, stop at 80%)
+# Run with defaults (dynamic forecast zone below 40%, reserve 25%, stop cap 80%)
 python3 monitor.py
 
 # Custom thresholds and logging
-python3 monitor.py --soc-start 52 --soc-stop 57 --log-interval 300
+python3 monitor.py --soc-start 45 --soc-reserve 25 --soc-stop 80 --log-interval 300
 
 # Override serial port if needed (not typically required)
 python3 monitor.py --inverter-port /dev/ttyUSB0 --inverter-baud 9600
@@ -378,12 +400,86 @@ This keeps the monitor running even if your SSH session disconnects.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| SOC Start | 25% | Start generator when SOC drops below |
-| SOC Stop | 80% | Stop generator when SOC rises above |
+| SOC Start | 40% | Forecast zone; below this, decide whether generator is needed before useful solar |
+| SOC Reserve | 25% | Hard reserve floor; dynamic decisions try to stay above this |
+| SOC Reserve Buffer | 2% | Planning margin above reserve, so the normal dynamic target floor is 27% |
+| SOC Stop | 80% | Maximum normal stop target and full-charge fallback cap |
+| Generator Charge Rate | 19% SOC/hour | Estimated SOC gain while charger is enabled |
+| Minimum Dynamic Runtime | 1800s (30 min) | Minimum charger-enabled runtime for dynamic starts, excluding Olimex warmup and cooldown |
+| Solar History Refresh | 21600s (6 hours) | How often the monitor relearns useful-solar start times from recent CSV logs |
+| Fuel Full Runtime | 12h | Estimated generator runtime from a full tank |
+| Fuel Alert Runtime | 4h | Send a fuel warning when estimated runtime remaining falls below this |
 | Poll Interval | 30s | Time between inverter reads |
 | Log Interval | 600s | Time between CSV log entries |
-| Generator Cooldown | 3600s | Min time between generator runs |
 | Generator Max Runtime | 14400s (4 hours) | Maximum generator run time |
+
+### Dynamic Charging Algorithm
+
+The deployed service still uses `--soc-start 40`, but this is no longer an unconditional start threshold. It is now the point where the monitor begins asking: "Will the battery actually fall below reserve before useful solar arrives?"
+
+Dynamic charging is enabled by default and follows this sequence:
+
+1. If SOC is at or below `--soc-reserve` (default 25%), start immediately.
+2. If SOC is above `--soc-start` (default 40%), stay idle.
+3. If useful solar is already active, stay idle even if SOC is below 40%.
+4. Otherwise, estimate recent low-solar SOC slope from in-memory readings over the last 3 hours. Negative slope means the battery is draining.
+5. Forecast the next useful solar start from recent CSV logs. The monitor uses the 75th percentile of the most recent 21 logged days so it is conservative without always assuming the latest poor-solar morning. If CSV history is unavailable, it falls back to 10:30 local time.
+6. Project SOC at the forecast solar start:
+   ```
+   projected_soc = current_soc + slope_pct_per_hour * hours_to_solar
+   ```
+7. If projected SOC stays above `soc_reserve + soc_reserve_buffer` (default 27%), defer the generator and wait for solar.
+8. If projected SOC falls below that reserve target, start the generator, but set a dynamic stop target just high enough to cover the projected deficit.
+9. Dynamic starts still run for at least `--min-generator-charge-runtime` seconds after the charger is enabled. The default is 30 minutes. This intentionally excludes the Olimex start warmup and the 3-minute cooldown, so a dynamic run does not spend most of its cycle warming up and cooling down.
+10. Dynamic targets are capped by `--soc-stop` (default 80%). Manual force charge and force stop files still take priority.
+
+Example: if SOC is 39% at 05:00, useful solar is forecast in 4 hours, and the recent drain slope is -2%/hour, the projected SOC at solar start is 31%. Since that is above the 27% reserve target, the generator stays off. If the same situation projects to 22%, the monitor starts the generator and targets only enough SOC to restore the reserve margin, subject to the 30-minute minimum charger-enabled runtime.
+
+Every dynamic decision is written to the service log with SOC, slope, hours to solar, projected SOC, reserve target, and dynamic stop target when a start is needed.
+
+The solar forecast is not fixed at service startup. The monitor refreshes the learned useful-solar start history every 6 hours from the rolling CSV log window. This lets the decision point move earlier as spring days lengthen, later as fall approaches, and adapt to array shading or other slow seasonal changes without a code deploy.
+
+### Fuel Runtime Alerts
+
+The monitor also tracks estimated fuel remaining by generator runtime. It does not try to measure fuel level directly; it treats a full tank as a configurable number of generator runtime hours and subtracts runtime whenever the generator is running, warming up, or cooling down.
+
+Defaults:
+- Full tank runtime estimate: 12 hours (`--fuel-full-runtime-hours 12`)
+- Fuel warning threshold: 4 hours remaining (`--fuel-alert-remaining-hours 4`)
+- State file: `/home/derekja/pigenny/fuel_state.json`
+- Refill marker: `/tmp/pigenny_fuel_refilled`
+
+When the estimated runtime remaining falls below 4 hours, the monitor sends one Pushover warning per refill. If the alert cannot be sent because the Pushover token is missing or the network is unavailable, it retries at most once per hour.
+
+After filling the generator tank, reset the estimate:
+```bash
+touch /tmp/pigenny_fuel_refilled
+```
+
+The monitor will notice the marker on the next cycle, reset the tank estimate to full, clear the sent-alert flag, and remove the marker.
+
+Pushover needs both a user key and an application API token. Configure them locally on the Pi, not in the repository:
+```bash
+cat >/home/derekja/pigenny/pushover.env <<'EOF'
+PIGENNY_PUSHOVER_USER_KEY=your-user-key
+PIGENNY_PUSHOVER_APP_TOKEN=your-application-api-token
+EOF
+chmod 600 /home/derekja/pigenny/pushover.env
+```
+
+The systemd service reads this file with `EnvironmentFile=-/home/derekja/pigenny/pushover.env`. The leading `-` means the service still starts if the file is absent, but fuel warnings cannot be sent until both values exist.
+
+If your phone can reach the Pi over ZeroTier, fuel warnings include a "Reset fuel estimate after refill" link. The monitor runs a small HTTP endpoint on port 8765:
+```text
+http://10.147.18.216:8765/fuel/refilled?token=...
+```
+
+The token is generated randomly and stored in `/home/derekja/pigenny/fuel_state.json`. Tapping the link resets the tank estimate to full and clears the sent-alert flag. The URL should only be used after actually refilling the generator.
+
+If the Pi's ZeroTier IP changes, set the public reset URL in `/home/derekja/pigenny/pushover.env`:
+```bash
+PIGENNY_FUEL_RESET_BASE_URL=http://10.147.18.216:8765
+```
 
 ---
 
@@ -543,8 +639,11 @@ ls /dev/ttySC*
 ### Default Configuration
 
 The Pi is configured to automatically run `monitor.py` on boot with these parameters:
-- **Start generator**: SOC < 40%
+- **Dynamic forecast zone**: SOC < 40%
+- **Reserve floor**: 25% SOC
 - **Stop generator**: SOC >= 80%
+- **Minimum dynamic generator charge runtime**: 30 minutes after charger enable
+- **Fuel warning**: Pushover alert below 4 estimated runtime hours remaining
 - **Max runtime**: 4 hours (14400 seconds)
 - **Log interval**: 10 minutes
 - **Serial port**: `/dev/ttySC1` (Waveshare RS-485 HAT)
@@ -579,7 +678,8 @@ Wants=network.target
 Type=simple
 User=derekja
 WorkingDirectory=/home/derekja/pigenny
-ExecStart=/usr/bin/python3 /home/derekja/pigenny/monitor.py --inverter-port /dev/ttySC1 --inverter-baud 19200 --soc-start 40 --soc-stop 80 --log-interval 600
+EnvironmentFile=-/home/derekja/pigenny/pushover.env
+ExecStart=/usr/bin/python3 /home/derekja/pigenny/monitor.py --inverter-port /dev/ttySC1 --inverter-baud 19200 --soc-start 40 --soc-reserve 25 --soc-stop 80 --fuel-full-runtime-hours 12 --fuel-alert-remaining-hours 4 --log-interval 600
 Restart=always
 RestartSec=30
 StandardOutput=journal
@@ -663,8 +763,8 @@ tmux new -s pigenny
 
 **3. Run monitor.py with your custom parameters:**
 ```bash
-# Example: Start at 30%, stop at 90%, log every 5 minutes
-python3 monitor.py --soc-start 30 --soc-stop 90 --log-interval 300
+# Example: Use a 35% forecast zone, 25% reserve, 85% stop cap, log every 5 minutes
+python3 monitor.py --soc-start 35 --soc-reserve 25 --soc-stop 85 --log-interval 300
 
 # The serial port and baud rate use correct defaults, no need to specify them
 ```
@@ -681,7 +781,7 @@ tmux attach -t pigenny
 
 **Important Notes:**
 - The manual process will continue running until you stop it or reboot
-- On Pi reboot, the systemd service will automatically start again with the default parameters (40%/80%)
+- On Pi reboot, the systemd service will automatically start again with the default dynamic parameters (40% forecast zone, 25% reserve, 80% stop cap)
 - If you want to permanently change the default parameters, see "Changing Default Parameters" below
 
 ### Changing Default Parameters
@@ -695,8 +795,8 @@ sudo nano /etc/systemd/system/pigenny.service
 
 **2. Modify the `ExecStart` line parameters:**
 ```ini
-# Example: Change to start at 35%, stop at 85%, log every 5 minutes
-ExecStart=/usr/bin/python3 /home/derekja/pigenny/monitor.py --inverter-port /dev/ttySC1 --inverter-baud 19200 --soc-start 35 --soc-stop 85 --log-interval 300
+# Example: Change to a 35% forecast zone, 25% reserve, 85% stop cap, log every 5 minutes
+ExecStart=/usr/bin/python3 /home/derekja/pigenny/monitor.py --inverter-port /dev/ttySC1 --inverter-baud 19200 --soc-start 35 --soc-reserve 25 --soc-stop 85 --fuel-full-runtime-hours 12 --fuel-alert-remaining-hours 4 --log-interval 300
 ```
 
 **3. Reload and restart:**
@@ -712,7 +812,7 @@ journalctl -u pigenny -n 20 --no-pager
 
 Look for the line showing your new thresholds:
 ```
-INFO | SOC thresholds: start < 35%, stop >= 85%
+INFO | SOC thresholds: forecast zone < 35%, reserve 25%, stop >= 85%
 ```
 
 ### Checking What's Running
@@ -1015,6 +1115,91 @@ Run the install script again to disable the firewall, then reboot the Olimex.
 
 ---
 
+## Recent Changes & Bug Fixes
+
+### January 3, 2026 - Critical Monitor Fixes
+
+**Fixed: Infinite STOPPING State Hang**
+- **Problem**: When `stop_generator()` failed with an exception (e.g., connection timeout, broken pipe), the monitor would get stuck in STOPPING state indefinitely. This caused the system to be unable to restart the generator even when SOC dropped critically low.
+- **Root Cause**: Exception handler in `stop_generator()` returned False without transitioning state. Additionally, `run_once()` had no handler for STOPPING state, creating an infinite loop.
+- **Fix**:
+  - Modified `stop_generator()` to always transition to COOLDOWN even on exception (generator likely already stopped if connection failed)
+  - Added STOPPING state handler in `run_once()` that verifies generator status and transitions to COOLDOWN
+  - File: `monitor.py` lines 398-405, 514-539
+
+**Fixed: Unexpected Generator Shutdown Detection**
+- **Problem**: When generator ran out of fuel or stalled unexpectedly, monitor remained in RUNNING state indefinitely with relays engaged (IGN+CHARGER), wasting power and potentially dangerous.
+- **Symptoms**: SOC stops increasing, generator inputs show "not running", but Pi monitor state shows RUNNING and relays stay engaged.
+- **Fix**: Added check in RUNNING state that calls `is_generator_running()` every 30 seconds. If generator unexpectedly stopped:
+  - Logs: "Generator stopped unexpectedly (fuel out, stall, or mechanical failure)"
+  - Calls `stop_generator()` to clear relays
+  - Transitions through normal shutdown sequence
+  - File: `monitor.py` lines 506-511
+
+**Fixed: Health Check Method Name Error**
+- **Problem**: Health check code called `self.generator.get_status()` but actual method is `status()`, causing hourly warnings.
+- **Fix**: Changed to correct method name `self.generator.status()`
+- **File**: `monitor.py` lines 429, 519
+
+**Fixed: Old Arch Linux Cron Jobs Causing Crashes**
+- **Problem**: Olimex still had old single-board system cron jobs running hourly:
+  - `/etc/cron.hourly/1logstats` → LogSiteStats.py (using 4.2MB RAM)
+  - `/etc/cron.hourly/2chargestate` → Old generator control logic
+  - With only 45MB total RAM and 1MB free, these caused memory exhaustion and crashes
+- **Fix**: Disabled cron jobs by renaming to `.disabled` extension
+- **Files**: `/etc/cron.hourly/1logstats.disabled`, `/etc/cron.hourly/2chargestate.disabled`
+
+### Fuel Depletion Behavior
+
+When generator runs out of fuel:
+
+1. **Detection** (within 30 seconds):
+   - Monitor detects `is_generator_running() == False` while in RUNNING state
+   - Logs error and calls `stop_generator()`
+   - Clears relays (IGN and CHARGER)
+   - Transitions: RUNNING → STOPPING → COOLDOWN → IDLE
+
+2. **Restart Attempts** (when SOC < 40% again):
+   - Attempt 1: Start sequence fails (no fuel), `start_attempts = 1`, returns to IDLE
+   - 30 seconds later, Attempt 2: Fails again, `start_attempts = 2`
+   - 30 seconds later, Attempt 3: Fails again, `start_attempts = 3`
+   - **Enters ERROR state** (threshold: 3 failed attempts)
+
+3. **ERROR State Behavior**:
+   - Logs every 30s: "In error state after 3 failed start attempts"
+   - **Will NOT attempt to start again**
+   - Requires manual intervention:
+     - Refuel generator
+     - Restart service: `sudo systemctl restart pigenny`
+     - Or reboot Pi
+
+### Suggested Enhancement: Auto-Recovery from ERROR State
+
+**Current Limitation**: Once in ERROR state after 3 failed starts, system requires manual service restart even if fuel is refilled.
+
+**Proposed Enhancement**:
+- Add configurable ERROR state timeout (e.g., 1 hour)
+- After timeout expires:
+  - Reset `start_attempts` counter to 0
+  - Transition from ERROR → IDLE
+  - Allows automatic recovery if problem resolved (fuel refilled, mechanical issue fixed)
+- Prevents rapid repeated start attempts while still enabling unattended recovery
+- Configuration: Add `error_recovery_timeout` parameter (default: 3600 seconds)
+
+**Implementation Notes**:
+- Track `error_state_entered_at` timestamp when entering ERROR
+- In ERROR state handler, check if timeout elapsed
+- If elapsed, log "ERROR state timeout elapsed, resetting and returning to IDLE"
+- This would make the system resilient to fuel-out scenarios without manual intervention
+
+**Trade-off**: System will retry starting after timeout even if underlying problem persists. However, this is acceptable because:
+- 1 hour delay prevents excessive cranking/wear
+- 3 attempts still required before re-entering ERROR
+- Worst case: System cycles through 3 start attempts every hour until fuel refilled
+- Battery protection still active (won't attempt if SOC > 40%)
+
+---
+
 ## Safety Considerations
 
 ### Generator Protection
@@ -1048,8 +1233,13 @@ Run the install script again to disable the firewall, then reboot the Olimex.
 - Generator server: TCP `9999`
 
 ### Default Settings
-- SOC Start: 40%
-- SOC Stop: 80%
+- SOC Forecast Zone: 40%
+- SOC Reserve: 25%
+- SOC Stop Cap: 80%
+- Dynamic Minimum Runtime: 30 charger-enabled minutes
+- Solar Forecast Refresh: 6 hours
+- Fuel Full Runtime Estimate: 12 hours
+- Fuel Alert Threshold: 4 runtime hours remaining
 - Log Interval: 10 minutes (600s)
 - Serial Port: `/dev/ttySC1`
 - Baud Rate: 19200
@@ -1066,13 +1256,16 @@ python3 gen_client.py --host 10.2.242.109
 sudo systemctl status pigenny
 journalctl -u pigenny -f
 
+# Reset fuel estimate after filling the tank
+touch /tmp/pigenny_fuel_refilled
+
 # Stop automatic monitor and run manually with custom thresholds
 sudo systemctl stop pigenny
 tmux new -s pigenny
-python3 monitor.py --soc-start 52 --soc-stop 57
+python3 monitor.py --soc-start 45 --soc-reserve 25 --soc-stop 80
 # Ctrl+B, D to detach
 
-# Restart automatic monitor with defaults (40%/80%)
+# Restart automatic monitor with defaults (40% forecast zone / 25% reserve / 80% stop cap)
 sudo systemctl start pigenny
 
 # Update Olimex SD card
