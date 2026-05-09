@@ -449,14 +449,18 @@ Defaults:
 - State file: `/home/derekja/pigenny/fuel_state.json`
 - Refill marker: `/tmp/pigenny_fuel_refilled`
 
-When the estimated runtime remaining falls below 4 hours, the monitor sends one Pushover warning per refill. If the alert cannot be sent because the Pushover token is missing or the network is unavailable, it retries at most once per hour.
+When the estimated runtime remaining falls below 4 hours, the monitor sends an emergency-priority Pushover warning. The alert repeats hourly and expires after 3 hours, which is Pushover's maximum per emergency notification. If it expires without acknowledgement and the tank is still below the warning threshold, PiGenny sends a fresh emergency notification. This repeats for up to 24 hours.
+
+Only acknowledge the Pushover emergency after actually refilling the generator. PiGenny polls Pushover's receipt API every 5 minutes; once the alert is acknowledged, the monitor resets the fuel estimate to full and clears the active warning.
+
+If the alert cannot be sent because the Pushover token is missing or the network is unavailable, PiGenny retries at most once per hour.
 
 After filling the generator tank, reset the estimate:
 ```bash
 touch /tmp/pigenny_fuel_refilled
 ```
 
-The monitor will notice the marker on the next cycle, reset the tank estimate to full, clear the sent-alert flag, and remove the marker.
+The monitor will notice the marker on the next cycle, reset the tank estimate to full, clear the active alert state, and remove the marker.
 
 Pushover needs both a user key and an application API token. Configure them locally on the Pi, not in the repository:
 ```bash
@@ -469,12 +473,12 @@ chmod 600 /home/derekja/pigenny/pushover.env
 
 The systemd service reads this file with `EnvironmentFile=-/home/derekja/pigenny/pushover.env`. The leading `-` means the service still starts if the file is absent, but fuel warnings cannot be sent until both values exist.
 
-If your phone can reach the Pi over ZeroTier, fuel warnings include a "Reset fuel estimate after refill" link. The monitor runs a small HTTP endpoint on port 8765:
+If your phone can reach the Pi over ZeroTier, fuel warnings also include a "Reset fuel estimate after refill" link. This is optional now that Pushover acknowledgement can reset the estimate. The monitor runs a small HTTP endpoint on port 8765:
 ```text
 http://10.147.18.216:8765/fuel/refilled?token=...
 ```
 
-The token is generated randomly and stored in `/home/derekja/pigenny/fuel_state.json`. Tapping the link resets the tank estimate to full and clears the sent-alert flag. The URL should only be used after actually refilling the generator.
+The token is generated randomly and stored in `/home/derekja/pigenny/fuel_state.json`. Tapping the link resets the tank estimate to full and clears the active alert state. The URL should only be used after actually refilling the generator.
 
 If the Pi's ZeroTier IP changes, set the public reset URL in `/home/derekja/pigenny/pushover.env`:
 ```bash

@@ -113,6 +113,10 @@ CONFIG = {
     'fuel_full_runtime_hours': 12.0,       # Estimated generator runtime from a full tank
     'fuel_alert_remaining_hours': 4.0,     # Alert when estimated runtime remaining drops below this
     'fuel_alert_retry_interval': 3600,     # Retry failed/misconfigured alerts at most hourly
+    'fuel_emergency_retry_seconds': 3600,  # Pushover emergency repeat interval
+    'fuel_emergency_expire_seconds': 10800, # Pushover max is 3 hours
+    'fuel_alert_cycle_expire_seconds': 86400, # Stop sending fresh emergencies after 1 day
+    'fuel_receipt_poll_interval': 300,     # Poll Pushover receipts every 5 minutes
     'fuel_reset_http_enabled': True,
     'fuel_reset_listen_host': '0.0.0.0',
     'fuel_reset_listen_port': 8765,
@@ -332,6 +336,10 @@ class FuelTracker:
         self.full_runtime_seconds = int(config['fuel_full_runtime_hours'] * 3600)
         self.alert_remaining_seconds = int(config['fuel_alert_remaining_hours'] * 3600)
         self.alert_retry_interval = config['fuel_alert_retry_interval']
+        self.emergency_retry_seconds = config['fuel_emergency_retry_seconds']
+        self.emergency_expire_seconds = config['fuel_emergency_expire_seconds']
+        self.alert_cycle_expire_seconds = config['fuel_alert_cycle_expire_seconds']
+        self.receipt_poll_interval = config['fuel_receipt_poll_interval']
         self.reset_base_url = config['fuel_reset_base_url'].rstrip('/')
         self.pushover_user_key = config['pushover_user_key']
         self.pushover_app_token = config['pushover_app_token']
@@ -344,6 +352,11 @@ class FuelTracker:
             'last_refill_at': now,
             'alert_sent': False,
             'last_alert_attempt_at': None,
+            'fuel_alert_cycle_started_at': None,
+            'active_fuel_alert_receipt': None,
+            'active_fuel_alert_sent_at': None,
+            'active_fuel_alert_expires_at': None,
+            'last_receipt_check_at': None,
             'reset_token': secrets.token_urlsafe(24),
         }
 
@@ -365,6 +378,11 @@ class FuelTracker:
         state.setdefault('last_refill_at', datetime.now().isoformat(timespec='seconds'))
         state.setdefault('alert_sent', False)
         state.setdefault('last_alert_attempt_at', None)
+        state.setdefault('fuel_alert_cycle_started_at', None)
+        state.setdefault('active_fuel_alert_receipt', None)
+        state.setdefault('active_fuel_alert_sent_at', None)
+        state.setdefault('active_fuel_alert_expires_at', None)
+        state.setdefault('last_receipt_check_at', None)
         if not state.get('reset_token'):
             state['reset_token'] = secrets.token_urlsafe(24)
             self._save_state(state)
@@ -453,15 +471,111 @@ class FuelTracker:
         except ValueError:
             return True
 
+    def _clear_active_alert(self):
+        self.state['active_fuel_alert_receipt'] = None
+        self.state['active_fuel_alert_sent_at'] = None
+        self.state['active_fuel_alert_expires_at'] = None
+        self.state['last_receipt_check_at'] = None
+        self._save_state()
+
+    def _alert_cycle_expired(self, now):
+        cycle_started = self.state.get('fuel_alert_cycle_started_at')
+        if not cycle_started:
+            return False
+
+        try:
+            elapsed = (now - datetime.fromisoformat(cycle_started)).total_seconds()
+            return elapsed >= self.alert_cycle_expire_seconds
+        except ValueError:
+            return False
+
+    def _active_alert_expired(self, now):
+        expires_at = self.state.get('active_fuel_alert_expires_at')
+        if not expires_at:
+            return False
+
+        try:
+            return now >= datetime.fromisoformat(expires_at)
+        except ValueError:
+            return True
+
+    def _should_poll_receipt(self, now):
+        last_check = self.state.get('last_receipt_check_at')
+        if not last_check:
+            return True
+
+        try:
+            elapsed = (now - datetime.fromisoformat(last_check)).total_seconds()
+            return elapsed >= self.receipt_poll_interval
+        except ValueError:
+            return True
+
+    def check_active_alert_acknowledgement(self):
+        """Reset fuel estimate if the active emergency notification was acknowledged."""
+        if not self.enabled:
+            return
+
+        receipt = self.state.get('active_fuel_alert_receipt')
+        if not receipt:
+            return
+
+        now = datetime.now()
+        if not self._should_poll_receipt(now):
+            return
+
+        self.state['last_receipt_check_at'] = now.isoformat(timespec='seconds')
+        self._save_state()
+
+        if not self.pushover_app_token:
+            log.warning("Cannot poll Pushover fuel alert receipt: app token is not configured")
+            return
+
+        url = (
+            f"https://api.pushover.net/1/receipts/{urllib.parse.quote(receipt)}.json"
+            f"?token={urllib.parse.quote(self.pushover_app_token)}"
+        )
+
+        try:
+            with urllib.request.urlopen(url, timeout=10) as response:
+                payload = json.loads(response.read().decode('utf-8'))
+        except Exception as e:
+            log.warning(f"Failed to poll Pushover fuel alert receipt: {e}")
+            return
+
+        if payload.get('acknowledged') == 1:
+            device = payload.get('acknowledged_by_device', 'unknown device')
+            self.reset_full(f"Pushover emergency acknowledgement from {device}")
+            return
+
+        if payload.get('expired') == 1 or self._active_alert_expired(now):
+            log.info("Pushover fuel alert receipt expired without acknowledgement")
+            self._clear_active_alert()
+
     def check_alert(self):
         if not self.enabled:
             return
 
         remaining = self.remaining_seconds()
-        if remaining > self.alert_remaining_seconds or self.state.get('alert_sent'):
+        if remaining > self.alert_remaining_seconds:
             return
 
         now = datetime.now()
+
+        if not self.state.get('fuel_alert_cycle_started_at'):
+            self.state['fuel_alert_cycle_started_at'] = now.isoformat(timespec='seconds')
+            self._save_state()
+
+        self.check_active_alert_acknowledgement()
+        if self.state.get('active_fuel_alert_receipt'):
+            return
+
+        if self._alert_cycle_expired(now):
+            if not self.state.get('alert_sent'):
+                log.warning("Fuel alert cycle expired after 24h without acknowledgement")
+                self.state['alert_sent'] = True
+                self._save_state()
+            return
+
         if not self._should_attempt_alert(now):
             return
 
@@ -472,27 +586,37 @@ class FuelTracker:
         message = (
             f"Estimated generator fuel remaining is {remaining/3600:.1f}h, "
             f"below the {self.alert_remaining_seconds/3600:.1f}h alert threshold. "
+            f"Only acknowledge this emergency after refilling the generator; "
+            f"acknowledgement resets the fuel estimate to full. "
             f"Last refill reset: {self.state.get('last_refill_at', 'unknown')}."
         )
 
-        if self._send_pushover(title, message, self.reset_url()):
-            self.state['alert_sent'] = True
+        receipt = self._send_pushover(title, message, self.reset_url())
+        if receipt:
+            self.state['active_fuel_alert_receipt'] = receipt
+            self.state['active_fuel_alert_sent_at'] = now.isoformat(timespec='seconds')
+            self.state['active_fuel_alert_expires_at'] = (
+                now + timedelta(seconds=self.emergency_expire_seconds)
+            ).isoformat(timespec='seconds')
+            self.state['last_receipt_check_at'] = None
             self._save_state()
-            log.info("Fuel warning sent via Pushover")
+            log.info("Emergency fuel warning sent via Pushover")
 
     def _send_pushover(self, title, message, reset_url=None):
         if not self.pushover_user_key or not self.pushover_app_token:
             log.warning(
                 "Fuel warning not sent: Pushover user key or app token is not configured"
             )
-            return False
+            return None
 
         payload_data = {
             'token': self.pushover_app_token,
             'user': self.pushover_user_key,
             'title': title,
             'message': message,
-            'priority': 1,
+            'priority': 2,
+            'retry': self.emergency_retry_seconds,
+            'expire': self.emergency_expire_seconds,
         }
         if reset_url:
             payload_data['url'] = reset_url
@@ -507,13 +631,19 @@ class FuelTracker:
                 method='POST'
             )
             with urllib.request.urlopen(request, timeout=10) as response:
+                body = response.read().decode('utf-8')
                 if 200 <= response.status < 300:
-                    return True
+                    payload = json.loads(body)
+                    receipt = payload.get('receipt')
+                    if receipt:
+                        return receipt
+                    log.warning("Pushover emergency alert response did not include a receipt")
+                    return None
                 log.warning(f"Pushover returned HTTP {response.status}")
         except Exception as e:
             log.warning(f"Failed to send Pushover fuel warning: {e}")
 
-        return False
+        return None
 
 
 class FuelResetServer:
@@ -1097,6 +1227,8 @@ class PiGennyMonitor:
         now = datetime.now()
         self.fuel_tracker.check_refill_marker()
         self._account_fuel_runtime(now)
+        self.fuel_tracker.check_active_alert_acknowledgement()
+        self.fuel_tracker.check_alert()
 
         # Read inverter
         data = self.inverter.read_all()
