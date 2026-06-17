@@ -90,6 +90,8 @@ CONFIG = {
     'solar_history_refresh_interval': 21600,  # Refresh learned solar starts every 6 hours
     'solar_fallback_start_hour': 10,     # Fallback useful-solar start if CSV history is unavailable
     'solar_fallback_start_minute': 30,
+    'solar_window_end_hour': 18,         # If no useful solar has occurred by this hour, treat the
+                                         # solar day as done (next useful solar is tomorrow morning)
     'solar_pv_power_threshold': 1000,    # Total PV power indicating useful solar
     'solar_charge_power_threshold': 200, # PV battery charge indicating useful solar
 
@@ -786,6 +788,7 @@ class PiGennyMonitor:
         self.last_voltage = None
         self.reading_history = []
         self.solar_start_minutes = []
+        self.solar_useful_date = None
         self.last_solar_history_refresh_at = None
         self._refresh_solar_start_history(datetime.now(), force=True)
 
@@ -897,8 +900,14 @@ class PiGennyMonitor:
 
         self.last_solar_history_refresh_at = now
 
-    def _forecast_solar_start(self, now):
-        """Forecast the next useful solar start as a local datetime."""
+    def _forecast_solar_start(self, now, allow_rollover=True):
+        """Forecast the next useful solar start as a local datetime.
+
+        With allow_rollover=True (default) the next start is returned: if today's
+        forecast start time has already passed, tomorrow's start is used. With
+        allow_rollover=False the result is pinned to today's forecast start time
+        so callers can reason about where 'now' sits within the current solar day.
+        """
         self._refresh_solar_start_history(now)
 
         if self.solar_start_minutes:
@@ -920,10 +929,46 @@ class PiGennyMonitor:
             microsecond=0
         )
 
-        if now >= forecast:
+        if allow_rollover and now >= forecast:
             forecast += timedelta(days=1)
 
         return forecast
+
+    def _solar_day_complete(self, now):
+        """True when today's useful-solar window is effectively over.
+
+        Distinguishes 'next useful solar is later today' (pre-dawn or an overcast
+        daylight period still to improve) from 'next useful solar is tomorrow'
+        (solar already helped today, or we are past the configured end-of-solar
+        hour). Without this, the forecast rolls straight to tomorrow's sunrise the
+        instant the clock passes the morning start time - projecting a ~24h drain
+        and firing the generator just as solar is ramping up.
+
+        The end-of-hour fallback keeps the evening/overnight pre-charge logic
+        working even if the service restarted today and never observed the
+        useful-solar period that already happened.
+        """
+        if self.solar_useful_date == now.date():
+            return True
+        return now.hour >= self.config['solar_window_end_hour']
+
+    def _hours_until_useful_solar(self, now):
+        """Estimate hours until the next useful solar window begins."""
+        solar_start_today = self._forecast_solar_start(now, allow_rollover=False)
+
+        if now < solar_start_today:
+            # Pre-dawn: useful solar is genuinely still to come today.
+            return max(0.0, (solar_start_today - now).total_seconds() / 3600.0)
+
+        if not self._solar_day_complete(now):
+            # Past the forecast start but solar has not yet been useful today
+            # (morning ramp-up, or an overcast daylight period). Treat solar as
+            # imminent rather than ~24h away so we do not false-start.
+            return 0.0
+
+        # Solar day is done; the next useful solar is tomorrow morning.
+        solar_start_next = solar_start_today + timedelta(days=1)
+        return max(0.0, (solar_start_next - now).total_seconds() / 3600.0)
 
     def _record_reading(self, data, now):
         """Keep a short in-memory history for SOC drain estimates."""
@@ -948,6 +993,11 @@ class PiGennyMonitor:
             reading for reading in self.reading_history
             if reading['timestamp'] >= cutoff
         ]
+
+        # Track whether useful solar has occurred today so the start forecast can
+        # tell "morning ramp-up" apart from "solar day already done".
+        if self._is_useful_solar(data):
+            self.solar_useful_date = now.date()
 
     def _estimate_soc_slope_per_hour(self, now):
         """Estimate current low-solar SOC slope in %/hour. Negative means draining."""
@@ -1000,8 +1050,7 @@ class PiGennyMonitor:
         if self._is_useful_solar(data):
             return False, None, "useful solar already active"
 
-        solar_start = self._forecast_solar_start(now)
-        hours_to_solar = max(0.0, (solar_start - now).total_seconds() / 3600.0)
+        hours_to_solar = self._hours_until_useful_solar(now)
         slope = self._estimate_soc_slope_per_hour(now)
         projected_soc = soc + (slope * hours_to_solar)
 
