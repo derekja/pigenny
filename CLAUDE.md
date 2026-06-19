@@ -85,6 +85,43 @@ When the generator is running and charging the batteries, you should see:
 
 ## Known Issues and Fixes
 
+### Daylight False-Start: Solar Forecast Rollover (Fixed 2026-06-19)
+
+**Problem:** The generator started in full sun (SOC 35%, ~1841W of PV, SOC actively
+climbing) because the dynamic-start forecast believed the next useful solar was
+*tomorrow*, projected a ~24h drain to -59.9% SOC, and fired the generator.
+
+This is the same failure class as the 2026-06-17 morning-ramp fix (commit ff0b131),
+but through a gap that fix left open. `_solar_day_complete()` latched `True` for the
+rest of the day as soon as solar was briefly "useful" in the morning. Then a transient
+load spike (`Load: 1823W`) drove battery charge power to 0W for a *single* sample -
+even though PV was still 1841W - which `_is_useful_solar()` read as "not useful solar"
+(it requires charge_power >= 200W as well as PV >= 1000W). With `_solar_day_complete()`
+already `True`, `_hours_until_useful_solar()` rolled to tomorrow's sunrise (~24h),
+projecting a catastrophic drain in the forecast zone (SOC < 40%) and starting.
+
+**Symptoms:**
+- Log line: `Dynamic charge start: ... solar in 23.9h, projected -59.9% < reserve target ...`
+  during daylight while PV is strong and SOC is rising.
+- Generator running with `IGN+CHARGER` while solar alone is already charging.
+
+**Fix Applied:**
+- Rewrote `_solar_day_complete()` to be purely time-based: solar is only "done for
+  today" once `now.hour >= solar_window_end_hour` (18:00). During the daylight window
+  a momentary dip is transient, so the next useful solar is imminent (0h), never
+  tomorrow.
+- Removed the now-dead `solar_useful_date` field and its tracking in `_record_reading()`.
+- The reserve backstop (`soc <= reserve`) still guards a genuine all-day-overcast
+  drain, and the end-of-hour boundary still triggers overnight pre-charge.
+
+**File:** monitor.py `_solar_day_complete()` (~line 937), `_record_reading()`, `__init__`.
+
+**Immediate recovery (if it happens again before the fix propagates):**
+`ssh ... derekja@momspi.local "touch /tmp/pigenny_force_stop"` - monitor.py stops the
+generator on its next poll (top priority while RUNNING) and removes the flag so normal
+operation resumes. Safe because it returns to IDLE and won't restart while SOC is above
+the 40% forecast zone.
+
 ### Thread Leak Bug (Fixed 2026-01-02)
 
 **Problem:** gen_server.py had a thread leak where each TCP connection created a new thread that was never cleaned up. After ~5 hours of hourly status checks, the system would exhaust thread limits and crash with "can't start new thread" error.
@@ -419,6 +456,10 @@ Register 5 contains SOC/SOH combined (SOC = value & 0xFF)
 
 ## Version History
 
+- 2026-06-19: Fixed daylight false-start - solar forecast no longer rolls to
+  tomorrow on a transient midday charge-power dip (`_solar_day_complete` now
+  purely time-based)
+- 2026-06-17: Fixed solar forecast false-start during morning solar ramp-up (ff0b131)
 - 2026-01-02: Fixed thread leak bug in gen_server.py
 - 2026-01-01: Increased max runtime from 2h to 4h
 - 2025-12-31: Added 20s AC stabilization delay before charger enable

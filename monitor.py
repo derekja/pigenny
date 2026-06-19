@@ -788,7 +788,6 @@ class PiGennyMonitor:
         self.last_voltage = None
         self.reading_history = []
         self.solar_start_minutes = []
-        self.solar_useful_date = None
         self.last_solar_history_refresh_at = None
         self._refresh_solar_start_history(datetime.now(), force=True)
 
@@ -937,19 +936,24 @@ class PiGennyMonitor:
     def _solar_day_complete(self, now):
         """True when today's useful-solar window is effectively over.
 
-        Distinguishes 'next useful solar is later today' (pre-dawn or an overcast
-        daylight period still to improve) from 'next useful solar is tomorrow'
-        (solar already helped today, or we are past the configured end-of-solar
-        hour). Without this, the forecast rolls straight to tomorrow's sunrise the
-        instant the clock passes the morning start time - projecting a ~24h drain
-        and firing the generator just as solar is ramping up.
+        Distinguishes 'next useful solar is still to come today' (pre-dawn, or a
+        daylight dip that solar will recover from) from 'next useful solar is
+        tomorrow' (we are past the configured end-of-solar hour). Without this,
+        the forecast rolls straight to tomorrow's sunrise - projecting a ~24h
+        drain and false-starting the generator in broad daylight.
 
-        The end-of-hour fallback keeps the evening/overnight pre-charge logic
-        working even if the service restarted today and never observed the
-        useful-solar period that already happened.
+        This is intentionally time-based only. An earlier version also treated
+        'useful solar already happened today' as day-complete, but that fired
+        far too eagerly: a transient midday load spike momentarily drops battery
+        charge power to zero even while PV is strong, which reads as a single
+        non-useful-solar sample, rolls the forecast to tomorrow's sunrise (~24h),
+        projects a catastrophic drain, and false-starts the generator in full
+        sun (observed 2026-06-19 08:34, SOC 35% with 1841W of PV). During the
+        solar window the sun is up and a dip is transient, so the next useful
+        solar is imminent, not tomorrow. The reserve backstop (soc <= reserve)
+        still guards against a genuine all-day-overcast drain, and the
+        end-of-hour boundary still pre-charges overnight.
         """
-        if self.solar_useful_date == now.date():
-            return True
         return now.hour >= self.config['solar_window_end_hour']
 
     def _hours_until_useful_solar(self, now):
@@ -993,11 +997,6 @@ class PiGennyMonitor:
             reading for reading in self.reading_history
             if reading['timestamp'] >= cutoff
         ]
-
-        # Track whether useful solar has occurred today so the start forecast can
-        # tell "morning ramp-up" apart from "solar day already done".
-        if self._is_useful_solar(data):
-            self.solar_useful_date = now.date()
 
     def _estimate_soc_slope_per_hour(self, now):
         """Estimate current low-solar SOC slope in %/hour. Negative means draining."""
