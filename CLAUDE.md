@@ -85,7 +85,55 @@ When the generator is running and charging the batteries, you should see:
 
 ## Known Issues and Fixes
 
-### Daylight False-Start: Solar Forecast Rollover (Fixed 2026-06-19)
+### Late-Day Reserve-Floor Start on Overcast Days (Fixed 2026-06-25)
+
+**Problem:** On a rainy day the generator waited until SOC hit the ~26% reserve
+floor before starting (observed 2026-06-25: deferred down through 27%, started at
+26% at 16:26), which is uncomfortably low with no daylight left to recover. Root
+cause was the 2026-06-19 fix: making `_solar_day_complete()` purely time-based
+(`now.hour >= 18`) meant that during *all* daylight hours the forecast assumed
+"next useful solar is 0h away," so `projected = soc + slope*0 = soc` and the
+preemptive forecast could never see a future drain. It only started once SOC
+crossed the reserve target. It also charged to a minimal target (~35%), then
+drained and restarted - short-cycling the generator between 26% and 35% all day.
+
+**Key data insight:** end-of-productive-solar is far too weather-variable to
+predict from history (sunny days in late June ended anywhere from 13:43 to 18:08;
+2026-06-25 was effectively done by 15:00 with max PV only 1539W). A learned/fixed
+end *time* can't tell an early-ending overcast day from a normal one - only
+**today's live PV** can.
+
+**Fix Applied (monitor.py):**
+- `_hours_until_useful_solar()` now has four regimes: pre-dawn (real countdown),
+  morning-ramp grace (`solar_morning_ramp_hours`, 2h after learned sunrise -> 0h
+  imminent), recently-productive PV (`_solar_currently_productive` -> 0h), and
+  otherwise "solar done for today" -> next useful solar is tomorrow. The last
+  regime makes the forecast project the overnight drain and start at the 40%
+  forecast-zone trigger instead of the reserve floor.
+- `_solar_currently_productive()` keys off **PV power** (>= 1000W) within a
+  `solar_productive_timeout` (60 min) recency window - NOT battery charge power.
+  This is what makes the 2026-06-19 false-start impossible: a transient load
+  spike zeroes charge power in full sun, but PV stays high, so solar still reads
+  as "present." The recency window rides through passing clouds.
+- `solar_window_end_hour` (18:00) is now only an absolute backstop (past it, solar
+  is done regardless of PV).
+- Both genuine-start branches now charge to the 80% stop threshold instead of a
+  minimal top-up, so it runs one full cycle instead of short-cycling.
+
+**Tunables (monitor.py CONFIG):** `solar_morning_ramp_hours` (2.0),
+`solar_productive_timeout` (3600s), `solar_pv_power_threshold` (1000W).
+
+**Read the live decision:** the `Dynamic charge defer/start: ... solar in X.Xh`
+log line tells you the regime - `0.0h` = solar here/imminent, `~15-16h` = treated
+as done for today (will start at the 40% trigger).
+
+### Daylight False-Start: Solar Forecast Rollover (Fixed 2026-06-19, superseded 2026-06-25)
+
+> NOTE: The time-based `_solar_day_complete()` from this fix was replaced on
+> 2026-06-25 (see above) because it disabled preemptive starts on overcast days.
+> The PV-based `_solar_currently_productive()` now prevents this false-start more
+> robustly. Original entry retained below for history.
+
 
 **Problem:** The generator started in full sun (SOC 35%, ~1841W of PV, SOC actively
 climbing) because the dynamic-start forecast believed the next useful solar was
@@ -456,6 +504,11 @@ Register 5 contains SOC/SOH combined (SOC = value & 0xFF)
 
 ## Version History
 
+- 2026-06-25: Fixed late-day reserve-floor start on overcast days. Solar
+  forecast now uses live PV (`_solar_currently_productive`, 60-min window) plus a
+  2h morning-ramp grace instead of a fixed end-of-day hour, so an overcast day
+  reverts to the 40% start trigger and a transient load spike can't false-start
+  in full sun. Genuine starts now charge to 80% (no short-cycling).
 - 2026-06-19: Fixed daylight false-start - solar forecast no longer rolls to
   tomorrow on a transient midday charge-power dip (`_solar_day_complete` now
   purely time-based)

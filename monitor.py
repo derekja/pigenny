@@ -90,10 +90,14 @@ CONFIG = {
     'solar_history_refresh_interval': 21600,  # Refresh learned solar starts every 6 hours
     'solar_fallback_start_hour': 10,     # Fallback useful-solar start if CSV history is unavailable
     'solar_fallback_start_minute': 30,
-    'solar_window_end_hour': 18,         # If no useful solar has occurred by this hour, treat the
-                                         # solar day as done (next useful solar is tomorrow morning)
+    'solar_window_end_hour': 18,         # Absolute backstop: past this hour solar is treated as done
+                                         # for today regardless of PV (next useful solar is tomorrow)
     'solar_pv_power_threshold': 1000,    # Total PV power indicating useful solar
     'solar_charge_power_threshold': 200, # PV battery charge indicating useful solar
+    'solar_morning_ramp_hours': 2.0,     # Hours after learned sunrise to treat solar as still imminent
+                                         # (covers a slow/overcast morning ramp before declaring overcast)
+    'solar_productive_timeout': 3600,    # Seconds PV must stay below the useful threshold before solar
+                                         # is treated as "done for today" (rides through passing clouds)
 
     # Timing
     'poll_interval': 30,          # Seconds between inverter reads
@@ -788,6 +792,7 @@ class PiGennyMonitor:
         self.last_voltage = None
         self.reading_history = []
         self.solar_start_minutes = []
+        self.last_productive_solar_at = None
         self.last_solar_history_refresh_at = None
         self._refresh_solar_start_history(datetime.now(), force=True)
 
@@ -933,53 +938,69 @@ class PiGennyMonitor:
 
         return forecast
 
-    def _solar_day_complete(self, now):
-        """True when today's useful-solar window is effectively over.
+    def _solar_currently_productive(self, now):
+        """True when PV has reached the useful threshold within the recency window.
 
-        Distinguishes 'next useful solar is still to come today' (pre-dawn, or a
-        daylight dip that solar will recover from) from 'next useful solar is
-        tomorrow' (we are past the configured end-of-solar hour). Without this,
-        the forecast rolls straight to tomorrow's sunrise - projecting a ~24h
-        drain and false-starting the generator in broad daylight.
-
-        This is intentionally time-based only. An earlier version also treated
-        'useful solar already happened today' as day-complete, but that fired
-        far too eagerly: a transient midday load spike momentarily drops battery
-        charge power to zero even while PV is strong, which reads as a single
-        non-useful-solar sample, rolls the forecast to tomorrow's sunrise (~24h),
-        projects a catastrophic drain, and false-starts the generator in full
-        sun (observed 2026-06-19 08:34, SOC 35% with 1841W of PV). During the
-        solar window the sun is up and a dip is transient, so the next useful
-        solar is imminent, not tomorrow. The reserve backstop (soc <= reserve)
-        still guards against a genuine all-day-overcast drain, and the
-        end-of-hour boundary still pre-charges overnight.
+        Keyed off PV power, NOT battery charge power. A transient load spike
+        momentarily diverts all solar to the load and zeroes battery charge power
+        even in full sun - that is what false-started the generator on 2026-06-19
+        (08:34, SOC 35%, PV 1841W, charge 0W). Judging by PV alone is immune to
+        that. The recency window (solar_productive_timeout) rides through passing
+        clouds, so only a sustained PV drop counts as solar finishing for the day.
         """
-        return now.hour >= self.config['solar_window_end_hour']
+        if self.last_productive_solar_at is None:
+            return False
+        elapsed = (now - self.last_productive_solar_at).total_seconds()
+        return 0 <= elapsed <= self.config['solar_productive_timeout']
 
     def _hours_until_useful_solar(self, now):
-        """Estimate hours until the next useful solar window begins."""
+        """Estimate hours until the next useful solar window begins.
+
+        Four regimes, in order:
+          1. Pre-dawn (before the learned sunrise): real countdown to today's start.
+          2. Morning ramp (within solar_morning_ramp_hours of sunrise): solar is
+             imminent (0h), so a slow/overcast ramp or a one-sample charge dip in
+             strong sun cannot false-start the generator.
+          3. Daytime with recently-productive PV: solar is here (0h).
+          4. Otherwise - PV has stayed below threshold past the morning ramp
+             (overcast day, or late afternoon after solar has quit), or we are
+             past the absolute end-of-window backstop: productive solar is done
+             for today, so the next useful solar is tomorrow morning. The forecast
+             then projects the overnight drain and starts at the forecast-zone
+             (40%) trigger instead of running the battery down to the reserve floor.
+        """
         solar_start_today = self._forecast_solar_start(now, allow_rollover=False)
 
         if now < solar_start_today:
-            # Pre-dawn: useful solar is genuinely still to come today.
             return max(0.0, (solar_start_today - now).total_seconds() / 3600.0)
 
-        if not self._solar_day_complete(now):
-            # Past the forecast start but solar has not yet been useful today
-            # (morning ramp-up, or an overcast daylight period). Treat solar as
-            # imminent rather than ~24h away so we do not false-start.
+        ramp_until = solar_start_today + timedelta(
+            hours=self.config['solar_morning_ramp_hours']
+        )
+        if now < ramp_until:
             return 0.0
 
-        # Solar day is done; the next useful solar is tomorrow morning.
+        past_window_end = now.hour >= self.config['solar_window_end_hour']
+        if not past_window_end and self._solar_currently_productive(now):
+            return 0.0
+
         solar_start_next = solar_start_today + timedelta(days=1)
         return max(0.0, (solar_start_next - now).total_seconds() / 3600.0)
 
     def _record_reading(self, data, now):
         """Keep a short in-memory history for SOC drain estimates."""
+        pv_total = data.get('pv1_power', 0) + data.get('pv2_power', 0)
+
+        # Track the last time PV was actually productive so the forecast can tell
+        # "solar is here / coming back" from "solar is done for today" without
+        # relying on battery charge power (which a load spike can zero in full sun).
+        if pv_total >= self.config['solar_pv_power_threshold']:
+            self.last_productive_solar_at = now
+
         self.reading_history.append({
             'timestamp': now,
             'soc': data['soc'],
-            'pv_total': data.get('pv1_power', 0) + data.get('pv2_power', 0),
+            'pv_total': pv_total,
             'charge_power': data.get('charge_power', 0),
             'discharge_power': data.get('discharge_power', 0),
             'generator_active': self.state in (
@@ -1033,15 +1054,12 @@ class PiGennyMonitor:
             return False, None, "above static threshold"
 
         if soc <= reserve:
-            min_gain = (
-                self.config['min_generator_charge_runtime'] / 3600.0 *
-                self.config['generator_charge_rate_soc_per_hour']
-            )
-            target_soc = min(
-                self.config['soc_stop_threshold'],
-                max(reserve_target, soc + min_gain)
-            )
-            return True, target_soc, "at or below reserve"
+            # Genuine reserve breach: charge back to the stop threshold instead of
+            # a minimal top-up. On an overcast day (no solar relief) a small target
+            # just short-cycles the generator between the reserve floor and ~35%,
+            # keeping the battery chronically low; one full cycle to the stop
+            # threshold is healthier and quieter.
+            return True, self.config['soc_stop_threshold'], "at or below reserve"
 
         if soc >= self.config['soc_start_threshold']:
             return False, None, "above forecast zone"
@@ -1061,15 +1079,10 @@ class PiGennyMonitor:
             )
             return False, None, "forecast above reserve"
 
-        required_gain = reserve_target - projected_soc
-        min_gain = (
-            self.config['min_generator_charge_runtime'] / 3600.0 *
-            self.config['generator_charge_rate_soc_per_hour']
-        )
-        target_soc = min(
-            self.config['soc_stop_threshold'],
-            max(soc + required_gain, soc + min_gain, reserve_target)
-        )
+        # Forecast says SOC will fall below reserve before solar returns. Charge
+        # back to the stop threshold (not a minimal top-up) so the generator runs
+        # one full cycle instead of short-cycling near the reserve floor.
+        target_soc = self.config['soc_stop_threshold']
 
         log.info(
             "Dynamic charge start: SOC %.1f%%, slope %.2f%%/h, solar in %.1fh, "
