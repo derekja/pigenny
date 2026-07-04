@@ -330,6 +330,9 @@ journalctl -u pigenny | grep "Olimex health"
 - Logs to CSV every 10 minutes
 - When SOC < 40%: starts generator automatically
 - When SOC >= 80% or 4 hours elapsed: stops generator
+- Solar handoff: if solar becomes productive again (PV >= 1000W) while the
+  generator is running and SOC has recovered to >= 40%, the generator stops
+  early and hands off to solar (respects the 30-min minimum runtime)
 - Generator runs with 60s warmup + 20s AC stabilization before charger enable
 - Shutdown includes 3-minute idle cooldown (if under load)
 
@@ -504,6 +507,11 @@ Register 5 contains SOC/SOH combined (SOC = value & 0xFF)
 
 ## Version History
 
+- 2026-07-04: Added solar-handoff early stop. A generator that started while
+  solar was absent now stops as soon as solar is productive again (PV >= 1000W)
+  and SOC has recovered above the 40% forecast zone, instead of burning fuel all
+  the way to the 80% target - so a run that started overnight/early won't grind
+  to 80% once the sun comes out. Keyed off PV, respects the 30-min min runtime.
 - 2026-06-25: Fixed late-day reserve-floor start on overcast days. Solar
   forecast now uses live PV (`_solar_currently_productive`, 60-min window) plus a
   2h morning-ramp grace instead of a fixed end-of-day hour, so an overcast day

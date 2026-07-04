@@ -1390,6 +1390,36 @@ class PiGennyMonitor:
             elif not self.manual_mode and soc >= self.config['soc_stop_threshold']:
                 log.info(f"SOC {soc}% reached threshold {self.config['soc_stop_threshold']}% - stopping generator")
                 self.stop_generator()
+            # Solar handoff: the generator started because solar was absent, but
+            # solar has returned and the battery has recovered out of the forecast
+            # zone. Hand off to solar instead of burning fuel up to the 80% target.
+            # Keyed off PV (via _solar_currently_productive), so a load-spike charge
+            # dip in full sun cannot keep it running. Respects min runtime so a
+            # start immediately followed by clearing skies does not short-cycle.
+            elif (
+                not self.manual_mode
+                and self.dynamic_charge_target_soc is not None
+                and soc >= self.config['soc_start_threshold']
+                and self._solar_currently_productive(now)
+            ):
+                elapsed = 0
+                if self.generator_started_at is not None:
+                    elapsed = (datetime.now() - self.generator_started_at).total_seconds()
+
+                if elapsed >= self.config['min_generator_charge_runtime']:
+                    log.info(
+                        "Solar productive again and SOC %.0f%% recovered above %d%% forecast "
+                        "zone - stopping generator, handing off to solar (target was %.0f%%)",
+                        soc, self.config['soc_start_threshold'], self.dynamic_charge_target_soc
+                    )
+                    self.stop_generator()
+                else:
+                    remaining = self.config['min_generator_charge_runtime'] - elapsed
+                    log.info(
+                        "Solar productive again and SOC %.0f%% recovered, holding for minimum "
+                        "runtime (%.0f min remaining) before solar handoff",
+                        soc, remaining / 60
+                    )
             elif not self.manual_mode and self.dynamic_charge_target_soc is not None:
                 elapsed = 0
                 if self.generator_started_at is not None:
