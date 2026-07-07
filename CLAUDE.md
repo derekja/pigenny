@@ -85,6 +85,45 @@ When the generator is running and charging the batteries, you should see:
 
 ## Known Issues and Fixes
 
+### Overnight Battery Drain: Generator Out of Fuel + Futile Crank Loop (Fixed 2026-07-07)
+
+**Problem:** Overnight the battery drained from 83% to 24% (just above the 25%
+reserve) because the generator repeatedly started and then **stalled ~30s after
+the charger load engaged** - the classic out-of-fuel / fuel-starvation-under-load
+signature (engine catches on carburetor-bowl residual, idles through warmup, dies
+under load). It looped start->stall for ~5 hours (03:52-08:49) without ever
+charging, then finally latched ERROR.
+
+**Two root-cause bugs it exposed:**
+
+1. **Futile crank loop.** `start_generator()` reset `start_attempts = 0` the moment
+   the Olimex returned `OK:` - but a stalling generator returns `OK:` every time
+   (it *does* catch), so the 3-strikes counter never accumulated and it cranked a
+   dead engine for hours, draining the battery and wearing the starter. No alert
+   was sent. Fix: the OK response no longer clears the counter; it clears only
+   after the generator has actually **run past `generator_stall_window` (180s)**.
+   A stop within that window counts as a failed start. After `max_start_attempts`
+   (3) stalls it latches `STATE_ERROR` (no more cranking until manual restart) and
+   fires **one Pushover alert** (`FuelTracker.send_notification`, priority 1).
+
+2. **Fuel gauge corrupted by a clock jump.** On 2026-07-04 the fuel estimate jumped
+   to empty in a single step - *"added 1764.7 runtime minutes"* (~29h) - because
+   `_account_fuel_runtime()` booked the raw wall-clock delta as runtime, and a
+   clock correction (bad-clock boot / NTP sync; note the Olimex RTC sits at 2018)
+   was counted as burn. Fix: clamp each accounting step to
+   `fuel_runtime_max_step_intervals` (4) x `poll_interval`, with a warning. Guards
+   the estimate against clock discontinuities. NOTE: the reactive stall-detection
+   above - not the (still fallible) fuel gauge - is what actually protects the
+   battery; the code does not refuse to start on a low fuel estimate because that
+   estimate can be wrong.
+
+**Recovery when it happens:** physically check/refill the generator, then
+`touch /tmp/pigenny_fuel_refilled` (resets the estimate) and
+`sudo systemctl restart pigenny` (clears the ERROR latch).
+
+**Tunables (monitor.py CONFIG):** `generator_stall_window` (180s),
+`fuel_runtime_max_step_intervals` (4), `max_start_attempts` (3).
+
 ### Late-Day Reserve-Floor Start on Overcast Days (Fixed 2026-06-25)
 
 **Problem:** On a rainy day the generator waited until SOC hit the ~26% reserve
@@ -507,6 +546,11 @@ Register 5 contains SOC/SOH combined (SOC = value & 0xFF)
 
 ## Version History
 
+- 2026-07-07: Fixed overnight battery drain from a generator out of fuel. A
+  generator that catches then stalls under load is now counted as a failed start
+  (was reset by the OK response), so it latches ERROR after 3 stalls and sends a
+  Pushover alert instead of cranking a dead engine for hours. Also clamped fuel
+  runtime accounting so a clock jump can't zero the tank estimate.
 - 2026-07-04: Added solar-handoff early stop. A generator that started while
   solar was absent now stops as soon as solar is productive again (PV >= 1000W)
   and SOC has recovered above the 40% forecast zone, instead of burning fuel all

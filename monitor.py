@@ -106,6 +106,9 @@ CONFIG = {
 
     # Safety
     'max_start_attempts': 3,      # Max consecutive start failures before giving up
+    'generator_stall_window': 180, # A run that ends within this many seconds of starting is a
+                                   # catch-and-die stall (engine caught on residual fuel then died
+                                   # under load), counted as a failed start toward max_start_attempts
 
     # Logging
     'csv_log_dir': '/var/log/pigenny',
@@ -118,6 +121,9 @@ CONFIG = {
     'fuel_state_file': '/home/derekja/pigenny/fuel_state.json',
     'fuel_full_runtime_hours': 12.0,       # Estimated generator runtime from a full tank
     'fuel_alert_remaining_hours': 4.0,     # Alert when estimated runtime remaining drops below this
+    'fuel_runtime_max_step_intervals': 4,  # Clamp a single fuel-accounting step to this many poll
+                                           # intervals; guards against a clock jump (NTP correction)
+                                           # being booked as hours of runtime and zeroing the tank
     'fuel_alert_retry_interval': 3600,     # Retry failed/misconfigured alerts at most hourly
     'fuel_emergency_retry_seconds': 3600,  # Pushover emergency repeat interval
     'fuel_emergency_expire_seconds': 10800, # Pushover max is 3 hours
@@ -651,6 +657,38 @@ class FuelTracker:
 
         return None
 
+    def send_notification(self, title, message, high_priority=True):
+        """Send a one-shot Pushover notification (no acknowledgement/receipt loop).
+
+        Reuses the fuel-alert Pushover credentials for non-fuel operator alerts,
+        e.g. a generator that has been latched into ERROR after repeated stalls.
+        Returns True if Pushover accepted the message.
+        """
+        if not self.pushover_user_key or not self.pushover_app_token:
+            log.warning("Pushover notification not sent: user key or app token not configured")
+            return False
+
+        payload = urllib.parse.urlencode({
+            'token': self.pushover_app_token,
+            'user': self.pushover_user_key,
+            'title': title,
+            'message': message,
+            'priority': 1 if high_priority else 0,
+        }).encode('utf-8')
+
+        try:
+            request = urllib.request.Request(
+                'https://api.pushover.net/1/messages.json', data=payload, method='POST'
+            )
+            with urllib.request.urlopen(request, timeout=10) as response:
+                if 200 <= response.status < 300:
+                    return True
+                log.warning(f"Pushover notification returned HTTP {response.status}")
+        except Exception as e:
+            log.warning(f"Failed to send Pushover notification: {e}")
+
+        return False
+
 
 class FuelResetServer:
     """Tiny HTTP server for phone-triggered fuel refill resets."""
@@ -786,6 +824,8 @@ class PiGennyMonitor:
         self.generator_stopped_at = None
         self.start_attempts = 0
         self.error_recovery_started_at = None
+        self.generator_failure_alerted = False
+        self.last_error_log_at = None
 
         # Last readings
         self.last_soc = None
@@ -1108,6 +1148,21 @@ class PiGennyMonitor:
 
         elapsed = (now - self.last_fuel_runtime_update_at).total_seconds()
         if self.last_fuel_runtime_active and elapsed > 0:
+            # Clamp the step so a wall-clock discontinuity (NTP correction after a
+            # bad-clock boot, or the process being suspended) cannot be booked as
+            # runtime. A normal step is one poll interval; anything far larger is a
+            # clock jump, not real burn. This is what falsely zeroed the tank on
+            # 2026-07-04 ("added 1764.7 runtime minutes" in a single step).
+            max_step = (
+                self.config['poll_interval'] *
+                self.config['fuel_runtime_max_step_intervals']
+            )
+            if elapsed > max_step:
+                log.warning(
+                    "Fuel accounting: ignoring anomalous %.0fs gap (clock jump/suspend?), "
+                    "counting %.0fs instead", elapsed, max_step
+                )
+                elapsed = max_step
             self.fuel_tracker.add_runtime(elapsed, "running")
 
         self.last_fuel_runtime_update_at = now
@@ -1172,7 +1227,12 @@ class PiGennyMonitor:
                 self.generator_started_at = command_finished_at
                 self.last_fuel_runtime_update_at = command_finished_at
                 self.last_fuel_runtime_active = True
-                self.start_attempts = 0
+                # NB: do NOT clear start_attempts here. A generator that catches on
+                # residual fuel then stalls under load also returns "OK:", so treating
+                # the OK as success let the counter reset every cycle and the system
+                # cranked a dead generator for ~5h (2026-07-07). The counter is only
+                # cleared once the generator has actually run past the stall window
+                # (see the STATE_RUNNING handler).
                 self.dynamic_charge_target_soc = target_soc
                 self.dynamic_charge_reason = reason
                 log.info("Generator started successfully")
@@ -1255,6 +1315,33 @@ class PiGennyMonitor:
 
         elapsed = (datetime.now() - self.generator_started_at).total_seconds()
         return elapsed >= self.config['generator_max_runtime']
+
+    def _alert_generator_failure(self, soc, stall_elapsed):
+        """Send a one-shot Pushover alert when the generator latches into ERROR.
+
+        stall_elapsed is the seconds-to-stall if the failures were catch-and-die
+        stalls (points at fuel), or None if the generator would not start at all.
+        """
+        if self.generator_failure_alerted:
+            return
+        self.generator_failure_alerted = True
+
+        if stall_elapsed is not None:
+            cause = (
+                f"Generator caught then stalled after ~{stall_elapsed:.0f}s under load on "
+                f"{self.start_attempts} consecutive attempts - likely out of fuel or fuel "
+                f"starvation."
+            )
+        else:
+            cause = f"Generator would not start on {self.start_attempts} consecutive attempts."
+
+        message = (
+            f"{cause} Battery SOC {soc}%. Generator disabled (ERROR state) to avoid cranking "
+            f"a dead engine. Check/refill fuel, then touch {FUEL_REFILL_FILE} and restart the "
+            f"pigenny service."
+        )
+        if self.fuel_tracker.send_notification("PiGenny generator failure", message):
+            log.info("Generator failure alert sent via Pushover")
 
     def check_olimex_health(self):
         """Check Olimex system health and log metrics"""
@@ -1354,6 +1441,21 @@ class PiGennyMonitor:
                     self.start_generator(target_soc=target_soc, reason=reason)
 
         elif self.state == self.STATE_RUNNING:
+            # A start that runs past the stall window is a genuine sustained start;
+            # clear the failure counter so only quick catch-and-die stalls accumulate
+            # toward the ERROR latch.
+            if (
+                self.start_attempts > 0
+                and self.generator_started_at is not None
+                and (datetime.now() - self.generator_started_at).total_seconds()
+                >= self.config['generator_stall_window']
+            ):
+                log.info(
+                    "Generator confirmed running past %ds stall window - cleared start-failure count",
+                    self.config['generator_stall_window']
+                )
+                self.start_attempts = 0
+                self.generator_failure_alerted = False
             # Check for manual force stop (highest priority)
             if force_stop:
                 log.info("Force stop file detected - stopping generator (manual override)")
@@ -1372,20 +1474,47 @@ class PiGennyMonitor:
                 self.stop_generator()
             # Check if generator unexpectedly stopped (fuel out, stall, etc)
             elif not self.is_generator_running():
-                log.error("Generator stopped unexpectedly (fuel out, stall, or mechanical failure)")
-                log.info("Entering error recovery mode - will attempt restarts")
-                # Clear relays via stop command, then enter error recovery
+                stall_elapsed = 0
+                if self.generator_started_at is not None:
+                    stall_elapsed = (datetime.now() - self.generator_started_at).total_seconds()
+                self.start_attempts += 1
+                quick_stall = stall_elapsed < self.config['generator_stall_window']
+                if quick_stall:
+                    log.error(
+                        "Generator stalled %.0fs after starting (start failure %d/%d) - "
+                        "likely out of fuel or fuel starvation under load",
+                        stall_elapsed, self.start_attempts, self.config['max_start_attempts']
+                    )
+                else:
+                    log.error(
+                        "Generator stopped unexpectedly after %.1f min running (failure %d/%d)",
+                        stall_elapsed / 60, self.start_attempts, self.config['max_start_attempts']
+                    )
+                # Clear relays via stop command (best effort)
                 try:
                     self.generator.stop()
                 except:
-                    pass  # Best effort to clear relays
-                self.state = self.STATE_ERROR_RECOVERY
-                self.error_recovery_started_at = datetime.now()
+                    pass
                 self.generator_started_at = None
                 self.dynamic_charge_target_soc = None
                 self.dynamic_charge_reason = None
                 self.manual_mode = False
-                # Don't reset start_attempts - let it accumulate
+                if self.start_attempts >= self.config['max_start_attempts']:
+                    # Repeated failed/stalled starts: stop cranking and alert. Do NOT
+                    # keep retrying a generator that catches then dies - that just wears
+                    # the starter and drains the battery (2026-07-07). Recovery is
+                    # manual (refill + restart pigenny).
+                    log.error(
+                        "Generator failed to sustain a run %d times - entering ERROR state "
+                        "(no further start attempts until manual restart)", self.start_attempts
+                    )
+                    self._alert_generator_failure(soc, stall_elapsed if quick_stall else None)
+                    self.state = self.STATE_ERROR
+                    self.error_recovery_started_at = None
+                else:
+                    log.info("Entering error recovery mode - will attempt restart")
+                    self.state = self.STATE_ERROR_RECOVERY
+                    self.error_recovery_started_at = datetime.now()
             # Check if we should stop based on SOC (only if not in manual mode)
             elif not self.manual_mode and soc >= self.config['soc_stop_threshold']:
                 log.info(f"SOC {soc}% reached threshold {self.config['soc_stop_threshold']}% - stopping generator")
@@ -1512,8 +1641,19 @@ class PiGennyMonitor:
                     self.dynamic_charge_reason = None
 
         elif self.state == self.STATE_ERROR:
-            log.error(f"In error state after {self.start_attempts} failed start attempts")
-            # Legacy error state - shouldn't reach here with new logic
+            # Latched after repeated failed/stalled starts. Stay put (no cranking)
+            # until a manual restart; log at most every 30 min instead of every poll
+            # so we don't flood the journal (previously ~2 lines/30s for hours).
+            if (
+                self.last_error_log_at is None
+                or (now - self.last_error_log_at).total_seconds() >= 1800
+            ):
+                log.error(
+                    "In ERROR state after %d failed/stalled start attempts - generator "
+                    "disabled until manual restart (check fuel; touch %s then restart pigenny)",
+                    self.start_attempts, FUEL_REFILL_FILE
+                )
+                self.last_error_log_at = now
 
         mode_str = " (MANUAL)" if self.manual_mode else ""
         log.info(f"State: {self.state}{mode_str}")
