@@ -85,6 +85,53 @@ When the generator is running and charging the batteries, you should see:
 
 ## Known Issues and Fixes
 
+### Wasteful Full Recharge Before Imminent Solar (Fixed 2026-08-01)
+
+**Problem:** On a sunny morning (2026-08-01) the generator started at ~40% SOC at
+06:17 and ran a full 2 hours to 80%, finishing at 08:12 - right as the sun came
+up. Solar then carried 80% -> 98% for free by 10:36. The whole generator run was
+wasted fuel; the battery would have been fine.
+
+**Three compounding causes (from the CSV + decision logs):**
+
+1. **Knife-edge preemptive trigger.** It fired via the forecast-preemptive branch:
+   `projected 26.1% < reserve target 27.0%, solar in 3.0h`. The projected trough
+   was only 1% below the buffered 27% target but still 1% **above** the 25% hard
+   floor - and solar was 3h out. The decision flip-flopped start/defer for 15 min
+   as the slope estimate jittered (-4.00 to -4.34%/h). Left alone, solar would
+   have caught it ~26-28%, above the floor.
+
+2. **Wrong target.** Once started it charged to 80% (the full-recharge target),
+   same as a genuine reserve breach - a leftover from the 2026-06-25 anti-
+   short-cycling fix. For a "solar coming in 3h" start it only needed to **bridge**
+   the trough (+5-10%), not fully recharge.
+
+3. **Solar-handoff was blind and couldn't stop it.** The handoff stops on PV >=
+   1000W, but **while the generator charges via AC the inverter curtails the MPPT**
+   - the panels sat at 200-320V but delivered only ~20-290W all morning. PV never
+   read productive until the generator stopped (then jumped 428W -> 1960W within
+   the hour). PV power fundamentally cannot reveal available solar during a
+   generator run.
+
+**Fix Applied (monitor.py `_dynamic_start_decision`):** when useful solar is
+forecast within `solar_imminent_hours` (6h), trust it:
+- Preempt only if the projected trough breaches the **hard floor** (`reserve`, 25%),
+  not the buffered `reserve_target` (27%). A morning trough that stays above the
+  floor now starts **no generator at all** (this morning's case defers).
+- If it does start (trough below the floor), charge only to a **bridge target**
+  (`dynamic_bridge_target_soc`, 50%), then hand the rest to solar - the bridge
+  target is what ends the run, since the solar-handoff is blind mid-run.
+- When solar is **distant** (evening/overnight, > 6h out), behaviour is unchanged:
+  buffered 27% trigger and full 80% recharge (no solar relief coming). The reserve-
+  breach branch (SOC <= 25%) still does a full 80% charge regardless.
+
+**Tunables (monitor.py CONFIG):** `solar_imminent_hours` (6.0),
+`dynamic_bridge_target_soc` (50).
+
+**Read the live decision:** the start/defer log line now names the regime -
+`trigger 25.0% (solar imminent)` vs `trigger 27.0% (solar distant)`, and the
+target reason is `... (solar imminent, bridge)` vs `... (solar distant)`.
+
 ### Overnight Battery Drain: Generator Out of Fuel + Futile Crank Loop (Fixed 2026-07-07)
 
 **Problem:** Overnight the battery drained from 83% to 24% (just above the 25%
@@ -546,6 +593,13 @@ Register 5 contains SOC/SOH combined (SOC = value & 0xFF)
 
 ## Version History
 
+- 2026-08-01: Fixed wasteful full recharge before imminent solar. A sunny-morning
+  forecast-preemptive start now trusts nearby solar: it preempts only below the 25%
+  hard floor (not the 27% buffer) when solar is within 6h, and charges only a 50%
+  bridge instead of grinding to 80%, letting free solar finish. Distant-solar and
+  reserve-breach starts still do the full 80% charge. Root cause included the
+  solar-handoff being blind mid-run (generator charging curtails the MPPT, so PV
+  reads low even in full sun).
 - 2026-07-07: Fixed overnight battery drain from a generator out of fuel. A
   generator that catches then stalls under load is now counted as a failed start
   (was reset by the OK response), so it latches ERROR after 3 stalls and sends a

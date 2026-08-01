@@ -79,6 +79,11 @@ CONFIG = {
     'soc_stop_threshold': 80,     # Stop generator when SOC rises above this
     'soc_reserve_threshold': 25,  # Hard reserve floor; avoid planning below this SOC
     'soc_reserve_buffer': 2,      # Extra SOC margin above reserve for forecast decisions
+    'solar_imminent_hours': 6.0,  # If useful solar is forecast within this many hours, trust it:
+                                   # only preempt below the hard reserve floor (not the buffered
+                                   # target) and charge only a bridge, not a full recharge
+    'dynamic_bridge_target_soc': 50,  # Forecast-preemptive target when solar is imminent: charge
+                                      # just enough to bridge the trough, then hand the rest to solar
     'dynamic_charging_enabled': True,
     'generator_charge_rate_soc_per_hour': 19.0,  # Observed generator charge rate from logs
     'min_generator_charge_runtime': 1800,  # Minimum charger-enabled runtime, excluding warmup/cooldown
@@ -1111,25 +1116,44 @@ class PiGennyMonitor:
         slope = self._estimate_soc_slope_per_hour(now)
         projected_soc = soc + (slope * hours_to_solar)
 
-        if projected_soc >= reserve_target:
+        # When useful solar is forecast soon, trust it: the free recovery is only a
+        # few hours out, so preempt only if the trough would breach the *hard* floor
+        # (not the buffered target), and then charge just a bridge instead of a full
+        # recharge - solar finishes the job for free. A morning trough that stays
+        # above the floor needs no generator at all. When solar is far away (evening/
+        # overnight), keep the conservative buffered trigger and the full 80% target.
+        solar_imminent = hours_to_solar <= self.config['solar_imminent_hours']
+        trigger = reserve if solar_imminent else reserve_target
+
+        if projected_soc >= trigger:
             log.info(
                 "Dynamic charge defer: SOC %.1f%%, slope %.2f%%/h, solar in %.1fh, "
-                "projected %.1f%% >= reserve target %.1f%%",
-                soc, slope, hours_to_solar, projected_soc, reserve_target
+                "projected %.1f%% >= trigger %.1f%% (%s)",
+                soc, slope, hours_to_solar, projected_soc, trigger,
+                "solar imminent" if solar_imminent else "solar distant"
             )
-            return False, None, "forecast above reserve"
+            return False, None, "forecast above trigger"
 
-        # Forecast says SOC will fall below reserve before solar returns. Charge
-        # back to the stop threshold (not a minimal top-up) so the generator runs
-        # one full cycle instead of short-cycling near the reserve floor.
-        target_soc = self.config['soc_stop_threshold']
+        # Forecast says SOC will fall below the trigger before solar returns.
+        if solar_imminent:
+            # Bridge only: get above the floor until solar takes over. Solar charging
+            # is masked while the generator runs (MPPT curtailed), so the solar-handoff
+            # can't stop us mid-run - the bridge target is what ends the run early.
+            target_soc = self.config['dynamic_bridge_target_soc']
+            reason = "forecast below floor (solar imminent, bridge)"
+        else:
+            # No solar relief coming: charge back to the stop threshold (not a minimal
+            # top-up) so the generator runs one full cycle instead of short-cycling
+            # near the reserve floor.
+            target_soc = self.config['soc_stop_threshold']
+            reason = "forecast below reserve (solar distant)"
 
         log.info(
             "Dynamic charge start: SOC %.1f%%, slope %.2f%%/h, solar in %.1fh, "
-            "projected %.1f%% < reserve target %.1f%%, target %.1f%%",
-            soc, slope, hours_to_solar, projected_soc, reserve_target, target_soc
+            "projected %.1f%% < trigger %.1f%%, target %.1f%% (%s)",
+            soc, slope, hours_to_solar, projected_soc, trigger, target_soc, reason
         )
-        return True, target_soc, "forecast below reserve"
+        return True, target_soc, reason
 
     def check_force_charge(self):
         """Check if force charge file exists"""
